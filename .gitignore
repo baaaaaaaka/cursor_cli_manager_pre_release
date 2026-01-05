@@ -1,8 +1,45 @@
+# Byte-compiled / cache
 __pycache__/
-*.pyc
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.venv/
-.DS_Store
+*.py[cod]
+*$py.class
 
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.hypothesis/
+.tox/
+.nox/
+
+# Type checker / linter caches
+.mypy_cache/
+.pyright/
+.ruff_cache/
+
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+pip-wheel-metadata/
+wheelhouse/
+
+# Editor / OS cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Project local runtime artifacts (do not commit)
+tmp_config/

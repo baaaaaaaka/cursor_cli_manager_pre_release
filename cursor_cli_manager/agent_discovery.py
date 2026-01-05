@@ -56,6 +56,7 @@ def discover_agent_workspaces(
     agent_dirs: Optional[CursorAgentDirs] = None,
     *,
     include_unknown_hashes: bool = True,
+    exclude_missing_paths: bool = False,
     workspace_candidates: Optional[Sequence[Path]] = None,
 ) -> List[AgentWorkspace]:
     """
@@ -135,6 +136,21 @@ def discover_agent_workspaces(
     for h in ordered_hashes:
         p = hash_to_path.get(h)
         out.append(AgentWorkspace(cwd_hash=h, workspace_path=p, chats_root=chats_dir / h))
+
+    if exclude_missing_paths:
+        kept: List[AgentWorkspace] = []
+        for w in out:
+            p = w.workspace_path
+            if p is None:
+                kept.append(w)
+                continue
+            try:
+                if p.is_dir():
+                    kept.append(w)
+            except Exception:
+                # Treat inaccessible paths as missing.
+                continue
+        out = kept
 
     if not include_unknown_hashes:
         out = [w for w in out if w.workspace_path is not None]

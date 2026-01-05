@@ -126,7 +126,8 @@ def _run_tui(
 
 
 def cmd_tui(agent_dirs: CursorAgentDirs) -> int:
-    workspaces = discover_agent_workspaces(agent_dirs)
+    # Hide chats whose original workspace folder no longer exists.
+    workspaces = discover_agent_workspaces(agent_dirs, exclude_missing_paths=True)
     if not workspaces:
         print("No cursor-agent chats found.")
         print("Tip: run cursor-agent inside a folder to create chats, then re-run this manager.")
