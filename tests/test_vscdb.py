@@ -3,11 +3,12 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Dict
 
 from cursor_cli_manager.vscdb import read_json, read_value
 
 
-def _make_vscdb(db_path: Path, items: dict[str, object]) -> None:
+def _make_vscdb(db_path: Path, items: Dict[str, object]) -> None:
     con = sqlite3.connect(db_path)
     con.execute("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);")
     for k, v in items.items():
