@@ -8,6 +8,9 @@ from typing import List, Optional
 
 ENV_CURSOR_AGENT_PATH = "CURSOR_AGENT_PATH"
 
+# Default cursor-agent flags we want enabled for interactive runs.
+DEFAULT_CURSOR_AGENT_FLAGS = ["--approve-mcps", "--browser"]
+
 
 def resolve_cursor_agent_path(explicit: Optional[str] = None) -> Optional[str]:
     """
@@ -52,6 +55,7 @@ def build_resume_command(
     cmd: List[str] = [agent]
     if workspace_path is not None:
         cmd.extend(["--workspace", str(workspace_path)])
+    cmd.extend(DEFAULT_CURSOR_AGENT_FLAGS)
     cmd.extend(["--resume", chat_id])
     return cmd
 
@@ -71,6 +75,7 @@ def build_new_command(
     cmd: List[str] = [agent]
     if workspace_path is not None:
         cmd.extend(["--workspace", str(workspace_path)])
+    cmd.extend(DEFAULT_CURSOR_AGENT_FLAGS)
     return cmd
 
 

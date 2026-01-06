@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from cursor_cli_manager.opening import (
     ENV_CURSOR_AGENT_PATH,
+    DEFAULT_CURSOR_AGENT_FLAGS,
     build_new_command,
     build_resume_command,
     resolve_cursor_agent_path,
@@ -46,6 +47,8 @@ class TestOpening(unittest.TestCase):
             self.assertEqual(cmd[0], str(agent))
             self.assertIn("--resume", cmd)
             self.assertIn("abc123", cmd)
+            for flag in DEFAULT_CURSOR_AGENT_FLAGS:
+                self.assertIn(flag, cmd)
 
     def test_build_new_command(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -55,6 +58,8 @@ class TestOpening(unittest.TestCase):
             self.assertEqual(cmd[0], str(agent))
             self.assertNotIn("--resume", cmd)
             self.assertIn("--workspace", cmd)
+            for flag in DEFAULT_CURSOR_AGENT_FLAGS:
+                self.assertIn(flag, cmd)
 
 
 if __name__ == "__main__":
