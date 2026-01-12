@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from cursor_cli_manager.agent_store import (
+    extract_initial_messages,
     extract_last_message_preview,
     extract_recent_messages,
     read_chat_meta,
@@ -89,6 +90,48 @@ class TestAgentStore(unittest.TestCase):
 
             msgs = extract_recent_messages(db, max_messages=5)
             self.assertEqual(msgs, [("user", "hello")])
+
+            msgs_all = extract_recent_messages(db, max_messages=None, max_blobs=None)
+            self.assertEqual(msgs_all, [("user", "hello")])
+
+            msgs_init = extract_initial_messages(db, max_messages=5, max_blobs=None)
+            self.assertEqual(msgs_init, [("user", "hello")])
+
+    def test_extract_initial_vs_recent_message_order(self) -> None:
+        """
+        initial: from the start of the chat (chronological)
+        recent: from the end of the chat (chronological, last N)
+        """
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "store.db"
+            con = sqlite3.connect(db)
+            con.execute("CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB);")
+            con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);")
+            con.execute("INSERT INTO meta(key, value) VALUES(?, ?);", ("0", ""))
+
+            def _msg(i: int, role: str) -> bytes:
+                txt = f"m{i}"
+                return json.dumps(
+                    {"id": str(i), "role": role, "content": [{"type": "text", "text": txt}]},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+
+            # 6 messages across 3 blobs, in chronological insertion order.
+            blob1 = b"\x00" + _msg(0, "user") + b"\x00" + _msg(1, "assistant") + b"\x00"
+            blob2 = b"\x00" + _msg(2, "user") + b"\x00" + _msg(3, "assistant") + b"\x00"
+            blob3 = b"\x00" + _msg(4, "user") + b"\x00" + _msg(5, "assistant") + b"\x00"
+            con.execute("INSERT INTO blobs(id, data) VALUES(?, ?);", ("b1", blob1))
+            con.execute("INSERT INTO blobs(id, data) VALUES(?, ?);", ("b2", blob2))
+            con.execute("INSERT INTO blobs(id, data) VALUES(?, ?);", ("b3", blob3))
+            con.commit()
+            con.close()
+
+            init3 = extract_initial_messages(db, max_messages=3, max_blobs=None)
+            self.assertEqual(init3, [("user", "m0"), ("assistant", "m1"), ("user", "m2")])
+
+            recent3 = extract_recent_messages(db, max_messages=3, max_blobs=None)
+            self.assertEqual(recent3, [("assistant", "m3"), ("user", "m4"), ("assistant", "m5")])
 
 
 if __name__ == "__main__":

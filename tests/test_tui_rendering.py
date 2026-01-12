@@ -2,6 +2,8 @@ import unittest
 from pathlib import Path
 from random import Random
 
+import curses
+
 from cursor_cli_manager.formatting import display_width
 from cursor_cli_manager.models import AgentChat, AgentWorkspace
 from cursor_cli_manager.tui import ListState, Rect, Theme, _list_rows, _preview_rows, compute_layout
@@ -94,6 +96,36 @@ class TestTuiRenderingModels(unittest.TestCase):
         self.assertEqual(len(rows), rect.h - 2)
         for text, _attr in rows:
             self.assertEqual(display_width(text), rect.w - 2)
+
+    def test_preview_rows_can_scroll(self) -> None:
+        rect = Rect(0, 0, 10, 30)  # inner is 8x28
+        msg_lines = [f"line {i}" for i in range(30)]
+        msg = "\n".join(msg_lines)
+
+        rows_top = _preview_rows(rect, workspace=None, chat=None, message=msg, scroll=0)
+        rows_scrolled = _preview_rows(rect, workspace=None, chat=None, message=msg, scroll=5)
+
+        self.assertEqual(rows_top[0][0].strip(), "line 0")
+        self.assertEqual(rows_scrolled[0][0].strip(), "line 5")
+
+        # Clamp: huge scroll should show the last page.
+        rows_clamped = _preview_rows(rect, workspace=None, chat=None, message=msg, scroll=10_000)
+        self.assertEqual(rows_clamped[0][0].strip(), "line 22")  # 30 lines, view_h=8 => start=22
+
+        for text, _attr in rows_scrolled:
+            self.assertEqual(display_width(text), rect.w - 2)
+
+    def test_list_rows_dim_all_when_unfocused(self) -> None:
+        rect = Rect(0, 0, 8, 24)  # inner is 6x22
+        theme = Theme(focused_selected_attr=1, unfocused_selected_attr=2)
+        state = ListState()
+        state.selected = 1
+        items = [("one", object()), ("two", object()), ("three", object())]
+
+        rows = _list_rows(rect, items, state, focused=False, filter_text="", theme=theme, dim_all=True)
+        self.assertEqual(len(rows), rect.h - 2)
+        for _text, attr in rows:
+            self.assertTrue(attr & curses.A_DIM)
 
 
 if __name__ == "__main__":

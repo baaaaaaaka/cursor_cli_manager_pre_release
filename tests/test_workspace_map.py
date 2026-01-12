@@ -60,3 +60,19 @@ class TestWorkspaceMap(unittest.TestCase):
             self.assertIn(h, by_hash)
             self.assertEqual(by_hash[h].workspace_path, ws_path.resolve())
 
+    def test_load_workspace_map_back_compat_plain_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            config_dir = Path(td) / "cursor_config"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            agent_dirs = CursorAgentDirs(config_dir)
+
+            # Write legacy format: {hash: "/path"}.
+            p = workspace_map_path(agent_dirs)
+            legacy = {"abc": "/tmp/ws"}
+            p.write_text(json.dumps(legacy), encoding="utf-8")
+
+            ws_map = load_workspace_map(agent_dirs)
+            self.assertIn("abc", ws_map.workspaces)
+            self.assertEqual(ws_map.workspaces["abc"]["path"], "/tmp/ws")
+            self.assertEqual(ws_map.workspaces["abc"]["last_seen_ms"], 0)
+

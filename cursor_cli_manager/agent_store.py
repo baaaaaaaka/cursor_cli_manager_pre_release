@@ -232,28 +232,65 @@ def _extract_text_from_message(msg: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _extract_recent_messages_from_connection(
+def _extract_messages_from_connection(
     con: sqlite3.Connection,
     *,
-    max_messages: int = 10,
-    max_blobs: int = 200,
+    max_messages: Optional[int] = 10,
+    max_blobs: Optional[int] = 200,
     roles: Sequence[str] = ("user", "assistant"),
+    from_start: bool = False,
 ) -> List[Tuple[str, str]]:
-    if max_messages <= 0:
+    if max_messages is not None and max_messages <= 0:
         return []
-
-    # Scan only the most recent blobs for performance, but keep ordering by rowid
-    # so the returned messages are chronological.
-    rows = con.execute(
-        "SELECT rowid, data FROM blobs ORDER BY rowid DESC LIMIT ?",
-        (max_blobs,),
-    ).fetchall()
-    rows.reverse()
 
     seen: set[Tuple[str, str]] = set()
     out: List[Tuple[str, str]] = []
+    stopped_early = False
 
-    for _rowid, data in rows:
+    def _append(role: str, text: str) -> None:
+        nonlocal stopped_early
+        if stopped_early:
+            return
+        key = (role, text)
+        if key in seen:
+            return
+        seen.add(key)
+        # Drop consecutive duplicates as we build (helps when messages are embedded multiple times).
+        if out and out[-1] == (role, text):
+            return
+        out.append((role, text))
+        if from_start and max_messages is not None and len(out) >= max_messages:
+            stopped_early = True
+
+    # Decide which blobs to scan.
+    #
+    # - from_start=True: scan chronologically; optionally limit to earliest max_blobs blobs.
+    # - from_start=False: keep the existing behavior of scanning *most recent* blobs for performance.
+    if from_start:
+        if max_blobs is None:
+            rows_iter = con.execute("SELECT rowid, data FROM blobs ORDER BY rowid ASC")
+        else:
+            if max_blobs <= 0:
+                return []
+            rows_iter = con.execute(
+                "SELECT rowid, data FROM blobs ORDER BY rowid ASC LIMIT ?",
+                (max_blobs,),
+            )
+    else:
+        if max_blobs is None:
+            rows_iter = con.execute("SELECT rowid, data FROM blobs ORDER BY rowid ASC")
+        else:
+            if max_blobs <= 0:
+                return []
+            # Scan only the most recent blobs for performance, but keep chronological order.
+            rows = con.execute(
+                "SELECT rowid, data FROM blobs ORDER BY rowid DESC LIMIT ?",
+                (max_blobs,),
+            ).fetchall()
+            rows.reverse()
+            rows_iter = rows
+
+    for _rowid, data in rows_iter:
         if isinstance(data, memoryview):
             data = data.tobytes()
         if not isinstance(data, (bytes, bytearray)):
@@ -276,22 +313,17 @@ def _extract_recent_messages_from_connection(
             if role == "user" and text.lstrip().startswith("<user_info>"):
                 continue
 
-            msg_id = obj.get("id")
-            key_id = msg_id if isinstance(msg_id, str) and msg_id else None
-            key = (role, key_id or text)
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append((role, text.strip()))
+            _append(role, text.strip())
+            if stopped_early:
+                break
+        if stopped_early:
+            break
 
-    # Drop consecutive duplicates (helps when the same message is embedded multiple times).
-    deduped: List[Tuple[str, str]] = []
-    for role, text in out:
-        if deduped and deduped[-1] == (role, text):
-            continue
-        deduped.append((role, text))
-
-    return deduped[-max_messages:]
+    if max_messages is None:
+        return out
+    if from_start:
+        return out[:max_messages]
+    return out[-max_messages:]
 
 
 def _extract_last_message_preview_from_connection(
@@ -317,7 +349,7 @@ def _extract_last_message_preview_from_connection(
         if last_text:
             return last_role, last_text
 
-    msgs = _extract_recent_messages_from_connection(con, max_messages=1)
+    msgs = _extract_messages_from_connection(con, max_messages=1, max_blobs=200, roles=("user", "assistant"), from_start=False)
     if msgs:
         role, text = msgs[-1]
         return role, text
@@ -328,8 +360,8 @@ def _extract_last_message_preview_from_connection(
 def extract_recent_messages(
     store_db: Path,
     *,
-    max_messages: int = 10,
-    max_blobs: int = 200,
+    max_messages: Optional[int] = 10,
+    max_blobs: Optional[int] = 200,
     roles: Sequence[str] = ("user", "assistant"),
 ) -> List[Tuple[str, str]]:
     """
@@ -339,11 +371,46 @@ def extract_recent_messages(
     does not directly contain message JSON objects. In that case, scanning across
     recent blobs usually finds embedded message objects.
     """
+    if max_messages is not None and max_messages <= 0:
+        return []
+
+    def _op(con: sqlite3.Connection) -> List[Tuple[str, str]]:
+        return _extract_messages_from_connection(
+            con,
+            max_messages=max_messages,
+            max_blobs=max_blobs,
+            roles=roles,
+            from_start=False,
+        )
+
+    res = _with_ro_connection(store_db, _op)
+    return res if isinstance(res, list) else []
+
+
+def extract_initial_messages(
+    store_db: Path,
+    *,
+    max_messages: int = 10,
+    max_blobs: Optional[int] = None,
+    roles: Sequence[str] = ("user", "assistant"),
+) -> List[Tuple[str, str]]:
+    """
+    Best-effort extraction of messages from the *start* of the chat.
+
+    This is used for fast preview snippets: we can stop early once we have enough
+    messages, avoiding a full DB scan.
+    """
     if max_messages <= 0:
         return []
 
     def _op(con: sqlite3.Connection) -> List[Tuple[str, str]]:
-        return _extract_recent_messages_from_connection(con, max_messages=max_messages, max_blobs=max_blobs, roles=roles)
+        return _extract_messages_from_connection(
+            con,
+            max_messages=max_messages,
+            max_blobs=max_blobs,
+            roles=roles,
+            from_start=True,
+        )
 
     res = _with_ro_connection(store_db, _op)
     return res if isinstance(res, list) else []

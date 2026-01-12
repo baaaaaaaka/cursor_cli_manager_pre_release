@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import curses
+import os
 import queue
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -63,6 +65,133 @@ def _spinner(t: float) -> str:
     frames = ["|", "/", "-", "\\"]
     idx = int(t * 10) % len(frames)  # ~10 FPS
     return frames[idx]
+
+
+_CSI = "\x1b["
+
+
+def probe_synchronized_output_support(*, timeout_s: float = 0.05) -> bool:
+    """
+    Best-effort probe for xterm "synchronized output" support.
+
+    We use DECRQM to query private mode 2026:
+      CSI ? 2026 $ p
+    Expected response:
+      CSI ? 2026 ; Ps $ y
+    Where Ps in {1,2,3,4} means the mode is recognized (supported).
+    Ps==0 means "not recognized".
+
+    If we can't confidently detect support, we return False.
+    """
+    try:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return False
+        in_fd = sys.stdin.fileno()
+        out_fd = sys.stdout.fileno()
+    except Exception:
+        return False
+
+    try:
+        import fcntl  # POSIX
+        import select  # POSIX
+        import termios  # POSIX
+        import tty  # POSIX
+    except Exception:
+        return False
+
+    try:
+        orig_attr = termios.tcgetattr(in_fd)
+        orig_flags = fcntl.fcntl(in_fd, fcntl.F_GETFL)
+    except Exception:
+        return False
+
+    buf = b""
+    try:
+        # Cbreak mode lets us read responses without waiting for a newline.
+        tty.setcbreak(in_fd)
+        try:
+            fcntl.fcntl(in_fd, fcntl.F_SETFL, orig_flags | os.O_NONBLOCK)
+        except Exception:
+            pass
+
+        # Query the mode.
+        try:
+            os.write(out_fd, b"\x1b[?2026$p")
+        except Exception:
+            return False
+
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while time.monotonic() < deadline:
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                r, _, _ = select.select([in_fd], [], [], remaining)
+            except Exception:
+                break
+            if not r:
+                break
+            try:
+                chunk = os.read(in_fd, 4096)
+            except BlockingIOError:
+                continue
+            except Exception:
+                break
+            if not chunk:
+                break
+            buf += chunk
+            # If we see the terminator, we likely have the full response.
+            if b"$y" in buf and b"\x1b[?2026;" in buf:
+                break
+    finally:
+        # Restore terminal settings.
+        try:
+            import termios  # type: ignore[no-redef]
+
+            termios.tcsetattr(in_fd, termios.TCSADRAIN, orig_attr)
+        except Exception:
+            pass
+        try:
+            import fcntl  # type: ignore[no-redef]
+
+            fcntl.fcntl(in_fd, fcntl.F_SETFL, orig_flags)
+        except Exception:
+            pass
+
+    # Parse: ESC[?2026;Ps$y
+    marker = b"\x1b[?2026;"
+    i = buf.find(marker)
+    if i < 0:
+        return False
+    tail = buf[i + len(marker) :]
+    digits = bytearray()
+    for b in tail:
+        if 48 <= b <= 57:
+            digits.append(b)
+            continue
+        break
+    if not digits:
+        return False
+    try:
+        ps = int(digits.decode("ascii", "ignore") or "0")
+    except Exception:
+        return False
+    # DECRQM Ps: 0=not recognized; 1=set; 2=reset; 3=permanently set; 4=permanently reset.
+    return ps in (1, 2, 3, 4)
+
+
+def _sync_output_begin() -> None:
+    # xterm "synchronized output" begin: DECSET 2026.
+    try:
+        os.write(sys.stdout.fileno(), b"\x1b[?2026h")
+    except Exception:
+        return
+
+
+def _sync_output_end() -> None:
+    # xterm "synchronized output" end: DECRST 2026.
+    try:
+        os.write(sys.stdout.fileno(), b"\x1b[?2026l")
+    except Exception:
+        return
 
 
 def _init_theme() -> Theme:
@@ -211,19 +340,24 @@ class _BackgroundLoader:
         self,
         *,
         load_chats: Callable[[AgentWorkspace], List[AgentChat]],
-        load_preview: Callable[[AgentChat], Tuple[Optional[str], Optional[str]]],
+        load_preview_snippet: Callable[[AgentChat, int], Tuple[Optional[str], Optional[str]]],
+        load_preview_full: Callable[[AgentChat], Tuple[Optional[str], Optional[str]]],
     ) -> None:
         self._load_chats = load_chats
-        self._load_preview = load_preview
+        self._load_preview_snippet = load_preview_snippet
+        self._load_preview_full = load_preview_full
         self._q: "queue.Queue[Tuple[str, object]]" = queue.Queue()
 
         self._chats_inflight: Set[str] = set()  # ws_hash
-        self._preview_inflight: Set[str] = set()  # chat_id
+        self._preview_snippet_inflight: Set[Tuple[str, int]] = set()  # (chat_id, max_messages)
+        self._preview_full_inflight: Set[str] = set()  # chat_id
         self._lock = threading.Lock()
 
     def has_pending(self) -> bool:
         with self._lock:
-            return bool(self._chats_inflight or self._preview_inflight) or (not self._q.empty())
+            return bool(self._chats_inflight or self._preview_snippet_inflight or self._preview_full_inflight) or (
+                not self._q.empty()
+            )
 
     def ensure_chats(self, ws: AgentWorkspace) -> None:
         key = ws.cwd_hash
@@ -244,22 +378,41 @@ class _BackgroundLoader:
 
         threading.Thread(target=_run, daemon=True).start()
 
-    def ensure_preview(self, chat: AgentChat) -> None:
-        key = chat.chat_id
+    def ensure_preview_snippet(self, chat: AgentChat, *, max_messages: int) -> None:
+        key = (chat.chat_id, max_messages)
         with self._lock:
-            if key in self._preview_inflight:
+            if key in self._preview_snippet_inflight:
                 return
-            self._preview_inflight.add(key)
+            self._preview_snippet_inflight.add(key)
 
         def _run() -> None:
             try:
-                role, text = self._load_preview(chat)
-                self._q.put(("preview_ok", key, role, text))
+                role, text = self._load_preview_snippet(chat, max_messages)
+                self._q.put(("preview_snippet_ok", chat.chat_id, max_messages, role, text))
             except Exception as e:
-                self._q.put(("preview_err", key, str(e)))
+                self._q.put(("preview_snippet_err", chat.chat_id, max_messages, str(e)))
             finally:
                 with self._lock:
-                    self._preview_inflight.discard(key)
+                    self._preview_snippet_inflight.discard(key)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def ensure_preview_full(self, chat: AgentChat) -> None:
+        key = chat.chat_id
+        with self._lock:
+            if key in self._preview_full_inflight:
+                return
+            self._preview_full_inflight.add(key)
+
+        def _run() -> None:
+            try:
+                role, text = self._load_preview_full(chat)
+                self._q.put(("preview_full_ok", key, role, text))
+            except Exception as e:
+                self._q.put(("preview_full_err", key, str(e)))
+            finally:
+                with self._lock:
+                    self._preview_full_inflight.discard(key)
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -374,6 +527,25 @@ class ListState:
         self.scroll = clamp(self.scroll, 0, max_scroll)
 
 
+class PreviewState:
+    def __init__(self) -> None:
+        self.scroll = 0
+
+    def clamp(self, n_lines: int, view_h: int) -> None:
+        if n_lines <= 0 or view_h <= 0:
+            self.scroll = 0
+            return
+        max_scroll = max(0, n_lines - view_h)
+        self.scroll = clamp(self.scroll, 0, max_scroll)
+
+    def move(self, delta: int, n_lines: int, view_h: int) -> None:
+        self.scroll += delta
+        self.clamp(n_lines, view_h)
+
+    def page(self, delta_pages: int, n_lines: int, view_h: int) -> None:
+        self.move(delta_pages * max(1, view_h), n_lines, view_h)
+
+
 def _safe_addstr(win: "curses.window", y: int, x: int, s: str, attr: int = 0) -> None:
     try:
         win.addstr(y, x, s, attr)
@@ -403,6 +575,16 @@ class _Pane:
         if rect.h >= 3 and rect.w >= 4:
             self.inner = self.outer.derwin(rect.h - 2, rect.w - 2, 1, 1)
             self.inner.leaveok(True)
+            # Enable terminal-side scroll optimizations when available.
+            # This is especially helpful for preview scrolling.
+            try:
+                self.inner.idlok(True)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            try:
+                self.inner.idcok(True)  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
         # Border is expensive to redraw on some terminals; draw it only when forced.
         self._border_drawn = False
@@ -412,6 +594,8 @@ class _Pane:
         self._last_hint_span: Optional[Tuple[int, int]] = None  # (x, w) in columns
 
         self._inner_cache: List[Tuple[str, int]] = []
+        # Preview-only incremental scroll state.
+        self._preview_last_start: Optional[int] = None
 
     def _title_x(self, title: str) -> int:
         # Center by display width (handles CJK correctly).
@@ -509,6 +693,7 @@ class _Pane:
         if len(self._inner_cache) != inner_h:
             self._inner_cache = [("", -1) for _ in range(inner_h)]
             force = True
+        changed = force
 
         for i in range(min(inner_h, len(rows))):
             s, attr = rows[i]
@@ -518,6 +703,7 @@ class _Pane:
                 continue
             _safe_addstr(self.inner, i, 0, s, attr)
             self._inner_cache[i] = (s, attr)
+            changed = True
 
         # If the caller provided fewer rows than the visible height, blank the rest.
         blank = (" " * inner_w, 0)
@@ -526,11 +712,200 @@ class _Pane:
                 continue
             _safe_addstr(self.inner, i, 0, blank[0], blank[1])
             self._inner_cache[i] = blank
+            changed = True
 
-        try:
-            self.inner.noutrefresh()
-        except curses.error:
+        if changed:
+            try:
+                self.inner.noutrefresh()
+            except curses.error:
+                return
+
+    def draw_preview_lines(
+        self,
+        lines: List[str],
+        start: int,
+        *,
+        use_terminal_scroll: bool = False,
+        bottom_overlay: Optional[Tuple[str, int]] = None,
+        force: bool = False,
+    ) -> None:
+        """
+        Draw preview content with incremental scrolling.
+
+        When `start` changes by a small delta, we scroll the inner window and only
+        redraw the newly exposed lines, reducing terminal output and flicker.
+        """
+        if not self.inner:
             return
+        try:
+            inner_h, inner_w = self.inner.getmaxyx()
+        except Exception:
+            return
+        if inner_h <= 0 or inner_w <= 0:
+            return
+
+        # Terminal-side scrolling affects the whole window region. If we're using a
+        # fixed bottom overlay (e.g. "Loading…"), disable terminal scrolling to
+        # keep the overlay row stable and avoid scrolling artifacts.
+        if bottom_overlay is not None:
+            use_terminal_scroll = False
+
+        # Ensure cache matches current window size.
+        if len(self._inner_cache) != inner_h:
+            self._inner_cache = [("", -1) for _ in range(inner_h)]
+            force = True
+            self._preview_last_start = None
+
+        blank = (" " * inner_w, 0)
+        content_h = inner_h - 1 if (bottom_overlay is not None and inner_h >= 1) else inner_h
+        content_h = max(0, content_h)
+
+        # Clamp start to available content.
+        max_start = max(0, len(lines) - content_h)
+        start = clamp(start, 0, max_start)
+
+        last = self._preview_last_start
+        diff = 0 if last is None else (start - last)
+
+        def _apply_overlay(changed: bool) -> bool:
+            if bottom_overlay is None or inner_h <= 0:
+                return changed
+            y = inner_h - 1
+            text, attr = bottom_overlay
+            s = pad_to_width(truncate_to_width(text, inner_w), inner_w)
+            if force or self._inner_cache[y] != (s, attr):
+                _safe_addstr(self.inner, y, 0, s, attr)
+                self._inner_cache[y] = (s, attr)
+                return True
+            return changed
+
+        # For multi-pane layouts, terminal-side line insert/delete scrolling often
+        # affects the whole terminal row, which can cause visible "flicker" in
+        # adjacent panes on some terminals (e.g. xterm.js). In those cases, prefer
+        # a straightforward redraw confined to this window.
+        if not use_terminal_scroll:
+            changed = force
+            for row in range(content_h):
+                idx = start + row
+                s = lines[idx] if idx < len(lines) else ""
+                s = pad_to_width(truncate_to_width(s, inner_w), inner_w)
+                if force or self._inner_cache[row] != (s, 0):
+                    _safe_addstr(self.inner, row, 0, s, 0)
+                    self._inner_cache[row] = (s, 0)
+                    changed = True
+            changed = _apply_overlay(changed)
+            self._preview_last_start = start
+            if changed:
+                try:
+                    self.inner.noutrefresh()
+                except curses.error:
+                    return
+            return
+
+        # If it's a big jump (page/home/end) or we don't have a baseline, redraw all.
+        if force or last is None or abs(diff) >= content_h:
+            changed = force
+            for row in range(content_h):
+                idx = start + row
+                s = lines[idx] if idx < len(lines) else ""
+                s = pad_to_width(truncate_to_width(s, inner_w), inner_w)
+                if force or self._inner_cache[row] != (s, 0):
+                    _safe_addstr(self.inner, row, 0, s, 0)
+                    self._inner_cache[row] = (s, 0)
+                    changed = True
+            changed = _apply_overlay(changed)
+            self._preview_last_start = start
+            if changed:
+                try:
+                    self.inner.noutrefresh()
+                except curses.error:
+                    return
+            return
+
+        # Small incremental scroll: scroll the window and patch the new lines.
+        if diff != 0:
+            # Best-effort: ensure scrolling is allowed.
+            try:
+                self.inner.scrollok(True)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            try:
+                # Some curses implementations gate the use of insert/delete-line
+                # optimizations on idlok/idcok.
+                try:
+                    self.inner.idlok(True)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                try:
+                    self.inner.idcok(True)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                self.inner.scroll(diff)  # type: ignore[attr-defined]
+            except Exception:
+                # If scrolling isn't supported, fall back to full redraw.
+                for row in range(inner_h):
+                    idx = start + row
+                    s = lines[idx] if idx < len(lines) else ""
+                    s = pad_to_width(truncate_to_width(s, inner_w), inner_w)
+                    if self._inner_cache[row] != (s, 0):
+                        _safe_addstr(self.inner, row, 0, s, 0)
+                        self._inner_cache[row] = (s, 0)
+                self._preview_last_start = start
+                try:
+                    self.inner.noutrefresh()
+                except curses.error:
+                    return
+                return
+
+            if diff > 0:
+                # View moved down: window content scrolled up; fill bottom lines.
+                d = diff
+                self._inner_cache = self._inner_cache[d:] + [blank for _ in range(d)]
+                for j in range(d):
+                    row = content_h - d + j
+                    idx = start + row
+                    s = lines[idx] if idx < len(lines) else ""
+                    s = pad_to_width(truncate_to_width(s, inner_w), inner_w)
+                    _safe_addstr(self.inner, row, 0, s, 0)
+                    self._inner_cache[row] = (s, 0)
+            else:
+                # View moved up: window content scrolled down; fill top lines.
+                d = -diff
+                self._inner_cache = [blank for _ in range(d)] + self._inner_cache[: inner_h - d]
+                for j in range(d):
+                    row = j
+                    idx = start + row
+                    s = lines[idx] if idx < len(lines) else ""
+                    s = pad_to_width(truncate_to_width(s, inner_w), inner_w)
+                    _safe_addstr(self.inner, row, 0, s, 0)
+                    self._inner_cache[row] = (s, 0)
+
+            _apply_overlay(True)
+            self._preview_last_start = start
+
+            try:
+                self.inner.noutrefresh()
+            except curses.error:
+                return
+            return
+
+        # No scroll delta: just patch any changed visible lines.
+        changed = force
+        for row in range(content_h):
+            idx = start + row
+            s = lines[idx] if idx < len(lines) else ""
+            s = pad_to_width(truncate_to_width(s, inner_w), inner_w)
+            if self._inner_cache[row] != (s, 0):
+                _safe_addstr(self.inner, row, 0, s, 0)
+                self._inner_cache[row] = (s, 0)
+                changed = True
+        changed = _apply_overlay(changed)
+        self._preview_last_start = start
+        if changed:
+            try:
+                self.inner.noutrefresh()
+            except curses.error:
+                return
 
 
 def _filter_items(items: List[Tuple[str, object]], needle: str) -> List[Tuple[str, object]]:
@@ -555,6 +930,7 @@ def _list_rows(
     focused: bool,
     filter_text: str,
     theme: Theme,
+    dim_all: bool = False,
 ) -> List[Tuple[str, int]]:
     """
     Build the visible list rows for a list pane. Each row is (text, attr).
@@ -579,12 +955,48 @@ def _list_rows(
             line = pad_to_width(truncate_to_width(label, inner_w), inner_w)
             if idx == state.selected:
                 attr = theme.focused_selected_attr if focused else theme.unfocused_selected_attr
+                if dim_all and (not focused):
+                    attr |= curses.A_DIM
             else:
-                attr = 0
+                attr = curses.A_DIM if (dim_all and (not focused)) else 0
             out.append((line, attr))
         else:
-            out.append((pad_to_width("", inner_w), 0))
+            out.append((pad_to_width("", inner_w), curses.A_DIM if (dim_all and (not focused)) else 0))
     return out
+
+
+def _preview_content_lines(
+    inner_w: int,
+    workspace: Optional[AgentWorkspace],
+    chat: Optional[AgentChat],
+    message: Optional[str],
+) -> List[str]:
+    lines: List[str] = []
+    if message:
+        lines.extend(wrap_text(message, inner_w))
+        return lines
+    if chat is None:
+        lines.append("Select a chat session to see details.")
+        return lines
+
+    title = chat.name or "Untitled"
+    lines.append(f"Title: {title}")
+    if chat.mode:
+        lines.append(f"Mode: {chat.mode}")
+    lines.append(f"Created: {format_epoch_ms(chat.created_at_ms)}")
+    if workspace and workspace.workspace_path:
+        lines.append(f"Workspace: {workspace.workspace_path}")
+    lines.append(f"Chat ID: {chat.chat_id}")
+
+    if chat.last_text:
+        lines.append("")
+        role = chat.last_role or "message"
+        if role == "history":
+            lines.append("History:")
+        else:
+            lines.append(f"Last {role}:")
+        lines.extend(wrap_text(chat.last_text, inner_w))
+    return lines
 
 
 def _preview_rows(
@@ -592,39 +1004,22 @@ def _preview_rows(
     workspace: Optional[AgentWorkspace],
     chat: Optional[AgentChat],
     message: Optional[str],
+    *,
+    scroll: int = 0,
 ) -> List[Tuple[str, int]]:
     if rect.h < 3 or rect.w < 4:
         return []
     inner_h = rect.h - 2
     inner_w = rect.w - 2
 
-    lines: List[str] = []
-    if message:
-        lines.extend(wrap_text(message, inner_w))
-    elif chat is None:
-        lines.append("Select a chat session to see details.")
-    else:
-        title = chat.name or "Untitled"
-        lines.append(f"Title: {title}")
-        if chat.mode:
-            lines.append(f"Mode: {chat.mode}")
-        lines.append(f"Created: {format_epoch_ms(chat.created_at_ms)}")
-        if workspace and workspace.workspace_path:
-            lines.append(f"Workspace: {workspace.workspace_path}")
-        lines.append(f"Chat ID: {chat.chat_id}")
-
-        if chat.last_text:
-            lines.append("")
-            role = chat.last_role or "message"
-            if role == "history":
-                lines.append("History:")
-            else:
-                lines.append(f"Last {role}:")
-            lines.extend(wrap_text(chat.last_text, inner_w))
+    lines = _preview_content_lines(inner_w, workspace, chat, message)
+    max_scroll = max(0, len(lines) - inner_h)
+    start = clamp(scroll, 0, max_scroll)
 
     out: List[Tuple[str, int]] = []
     for i in range(inner_h):
-        ln = lines[i] if i < len(lines) else ""
+        src_i = start + i
+        ln = lines[src_i] if src_i < len(lines) else ""
         out.append((pad_to_width(truncate_to_width(ln, inner_w), inner_w), 0))
     return out
 
@@ -704,7 +1099,9 @@ def select_chat(
     *,
     workspaces: List[AgentWorkspace],
     load_chats: Callable[[AgentWorkspace], List[AgentChat]],
-    load_preview: Callable[[AgentChat], Tuple[Optional[str], Optional[str]]],
+    load_preview_snippet: Callable[[AgentChat, int], Tuple[Optional[str], Optional[str]]],
+    load_preview_full: Callable[[AgentChat], Tuple[Optional[str], Optional[str]]],
+    sync_output: bool = False,
 ) -> Optional[Tuple[AgentWorkspace, Optional[AgentChat]]]:
     try:
         curses.curs_set(0)
@@ -718,19 +1115,27 @@ def select_chat(
 
     ws_state = ListState()
     chat_state = ListState()
-    focus = "workspaces"  # or "chats"
+    focus = "workspaces"  # "workspaces" | "chats" | "preview"
+    last_list_focus = "workspaces"  # "workspaces" | "chats"
+    preview_state = PreviewState()
+    last_preview_key: object = object()
+    last_preview_lines_key: object = object()
+    preview_lines_cached: List[str] = [""]
     ws_filter = ""
     chat_filter = ""
     input_mode: Optional[str] = None  # "ws" | "chat"
 
-    bg = _BackgroundLoader(load_chats=load_chats, load_preview=load_preview)
+    bg = _BackgroundLoader(load_chats=load_chats, load_preview_snippet=load_preview_snippet, load_preview_full=load_preview_full)
 
     chat_cache: Dict[str, List[AgentChat]] = {}
     chat_error: Dict[str, str] = {}
     chat_loading: Set[str] = set()
-    preview_cache: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
-    preview_error: Dict[str, str] = {}
-    preview_loading: Set[str] = set()
+    preview_snippet_cache: Dict[Tuple[str, int], Tuple[Optional[str], Optional[str]]] = {}
+    preview_snippet_error: Dict[Tuple[str, int], str] = {}
+    preview_snippet_loading: Set[Tuple[str, int]] = set()
+    preview_full_cache: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
+    preview_full_error: Dict[str, str] = {}
+    preview_full_loading: Set[str] = set()
     title_cache: Optional[ChatTitleCache] = None
     title_cache_dir: Optional["Path"] = None
     # Used only for selected-chat title persistence.
@@ -764,13 +1169,22 @@ def select_chat(
             bg.ensure_chats(ws)
         return []
 
-    def get_preview(chat: AgentChat) -> Tuple[Optional[str], Optional[str]]:
+    def get_preview_snippet(chat: AgentChat, *, max_messages: int) -> Tuple[Optional[str], Optional[str]]:
+        key = (chat.chat_id, max_messages)
+        if key in preview_snippet_cache:
+            return preview_snippet_cache[key]
+        if key not in preview_snippet_loading:
+            preview_snippet_loading.add(key)
+            bg.ensure_preview_snippet(chat, max_messages=max_messages)
+        return None, None
+
+    def get_preview_full(chat: AgentChat) -> Tuple[Optional[str], Optional[str]]:
         key = chat.chat_id
-        if key in preview_cache:
-            return preview_cache[key]
-        if key not in preview_loading:
-            preview_loading.add(key)
-            bg.ensure_preview(chat)
+        if key in preview_full_cache:
+            return preview_full_cache[key]
+        if key not in preview_full_loading:
+            preview_full_loading.add(key)
+            bg.ensure_preview_full(chat)
         return None, None
 
     renderer = _Renderer(stdscr)
@@ -794,22 +1208,44 @@ def select_chat(
                     chat_cache[ws_hash] = []
                     chat_error[ws_hash] = f"Failed to load chats: {err}"
                     chat_loading.discard(ws_hash)
-            elif kind == "preview_ok":
+            elif kind == "preview_snippet_ok":
+                _, chat_id, max_messages, role, text = item
+                if isinstance(chat_id, str) and isinstance(max_messages, int):
+                    k = (chat_id, max_messages)
+                    preview_snippet_cache[k] = (
+                        role if isinstance(role, str) else None,
+                        text if isinstance(text, str) else None,
+                    )
+                    preview_snippet_error.pop(k, None)
+                    preview_snippet_loading.discard(k)
+            elif kind == "preview_snippet_err":
+                _, chat_id, max_messages, err = item
+                if isinstance(chat_id, str) and isinstance(max_messages, int):
+                    k = (chat_id, max_messages)
+                    preview_snippet_cache[k] = (None, None)
+                    preview_snippet_error[k] = f"Failed to load preview: {err}"
+                    preview_snippet_loading.discard(k)
+            elif kind == "preview_full_ok":
                 _, chat_id, role, text = item
                 if isinstance(chat_id, str):
-                    preview_cache[chat_id] = (role if isinstance(role, str) else None, text if isinstance(text, str) else None)
-                    preview_error.pop(chat_id, None)
-                    preview_loading.discard(chat_id)
-            elif kind == "preview_err":
+                    preview_full_cache[chat_id] = (
+                        role if isinstance(role, str) else None,
+                        text if isinstance(text, str) else None,
+                    )
+                    preview_full_error.pop(chat_id, None)
+                    preview_full_loading.discard(chat_id)
+            elif kind == "preview_full_err":
                 _, chat_id, err = item
                 if isinstance(chat_id, str):
-                    preview_cache[chat_id] = (None, None)
-                    preview_error[chat_id] = f"Failed to load preview: {err}"
-                    preview_loading.discard(chat_id)
+                    preview_full_cache[chat_id] = (None, None)
+                    preview_full_error[chat_id] = f"Failed to load preview: {err}"
+                    preview_full_loading.discard(chat_id)
 
         max_y, max_x = stdscr.getmaxyx()
         layout = compute_layout(max_y, max_x)
         force_full = renderer.ensure(layout, max_y, max_x)
+        preview_inner_h = max(0, layout.preview.h - 2)
+        preview_inner_w = max(0, layout.preview.w - 2)
 
         # Best-effort: detect current working directory workspace.
         try:
@@ -883,15 +1319,45 @@ def select_chat(
             else:
                 msg = "Workspace path is unknown. Run ccm from that folder to learn it."
 
+        preview_loading_more = False
         if ws and selected_chat and not msg:
             role, text = (None, None)
-            if selected_chat.latest_root_blob_id:
-                role, text = get_preview(selected_chat)
-            if selected_chat.chat_id in preview_loading and (role is None and text is None):
-                msg = f"{spin} Loading preview…"
-            if selected_chat.chat_id in preview_error and not msg:
-                msg = preview_error[selected_chat.chat_id]
             new_name = selected_chat.name
+
+            # When not in the preview pane, only load a small "initial" snippet
+            # (enough messages to roughly fill the preview height). When the user
+            # focuses the preview pane, load the full history.
+            snippet_max_messages = max(8, preview_inner_h)
+
+            if selected_chat.latest_root_blob_id:
+                if focus == "preview":
+                    role, text = get_preview_full(selected_chat)
+                    if selected_chat.chat_id in preview_full_error and (role is None and text is None):
+                        msg = preview_full_error[selected_chat.chat_id]
+                    if role is None and text is None and not msg:
+                        # Fall back to snippet while full is loading.
+                        s_role, s_text = get_preview_snippet(selected_chat, max_messages=snippet_max_messages)
+                        if s_role is not None or s_text is not None:
+                            role, text = s_role, s_text
+                            preview_loading_more = True
+                        else:
+                            # No snippet yet: show a loading message in the preview body.
+                            if (
+                                (selected_chat.chat_id in preview_full_loading)
+                                or ((selected_chat.chat_id, snippet_max_messages) in preview_snippet_loading)
+                            ):
+                                msg = f"{spin} Loading preview…"
+                            k = (selected_chat.chat_id, snippet_max_messages)
+                            if k in preview_snippet_error and not msg:
+                                msg = preview_snippet_error[k]
+                else:
+                    role, text = get_preview_snippet(selected_chat, max_messages=snippet_max_messages)
+                    k = (selected_chat.chat_id, snippet_max_messages)
+                    if k in preview_snippet_loading and (role is None and text is None):
+                        msg = f"{spin} Loading preview…"
+                    if k in preview_snippet_error and not msg:
+                        msg = preview_snippet_error[k]
+
             if isinstance(role, str) and role == "history" and isinstance(text, str) and is_generic_chat_name(new_name):
                 derived_title = _derive_title_from_history(text)
                 if derived_title:
@@ -935,25 +1401,56 @@ def select_chat(
         status = "Tab/Left/Right: switch  /: search  Enter: open  q: quit"
         if input_mode:
             status = "Type to search. Enter: apply  Esc: cancel"
+        elif focus == "preview":
+            status = "↑/↓ PgUp/PgDn: scroll preview  Tab/Left/Right: switch  q: quit"
+
+        # Preview scroll state: reset on content changes, clamp every frame.
+        # Cache wrapped preview lines so scrolling doesn't re-wrap on every keypress.
+        preview_key = ("msg" if msg else "chat", (ws.cwd_hash if ws else None), (selected_chat.chat_id if selected_chat else None))
+        preview_lines_key = (
+            preview_inner_w,
+            msg,
+            (ws.workspace_path.as_posix() if (ws and ws.workspace_path) else None),
+            (selected_chat.chat_id if selected_chat else None),
+            (selected_chat.name if selected_chat else None),
+            (selected_chat.mode if selected_chat else None),
+            (selected_chat.created_at_ms if selected_chat else None),
+            (selected_chat.last_role if selected_chat else None),
+            (selected_chat.last_text if selected_chat else None),
+        )
+        if preview_lines_key != last_preview_lines_key:
+            preview_lines_cached = _preview_content_lines(preview_inner_w, ws, selected_chat, msg) if preview_inner_w > 0 else [""]
+            last_preview_lines_key = preview_lines_key
+        preview_lines = preview_lines_cached
+        if preview_key != last_preview_key:
+            preview_state.scroll = 0
+            last_preview_key = preview_key
+        preview_overlay_active = bool(focus == "preview" and preview_loading_more)
+        preview_view_h = max(0, preview_inner_h - (1 if preview_overlay_active else 0))
+        preview_state.clamp(len(preview_lines), preview_view_h)
 
         # Draw panes with minimal updates.
         if layout.mode == "1col":
             if renderer.list_pane is None:
                 continue
-            list_title = "Workspaces" if focus == "workspaces" else "Chat Sessions"
-            list_items = ws_items if focus == "workspaces" else chat_items
-            list_state = ws_state if focus == "workspaces" else chat_state
-            list_filter = ws_filter if focus == "workspaces" else chat_filter
+            list_mode = last_list_focus if focus == "preview" else focus
+            list_title = "Workspaces" if list_mode == "workspaces" else "Chat Sessions"
+            list_items = ws_items if list_mode == "workspaces" else chat_items
+            list_state = ws_state if list_mode == "workspaces" else chat_state
+            list_filter = ws_filter if list_mode == "workspaces" else chat_filter
 
-            renderer.list_pane.draw_frame(list_title, focused=True, filter_text=list_filter, force=force_full)
+            renderer.list_pane.draw_frame(
+                list_title, focused=(focus != "preview"), filter_text=list_filter, force=force_full
+            )
             renderer.list_pane.draw_inner_rows(
                 _list_rows(
                     layout.workspaces,
                     list_items,
                     list_state,
-                    focused=True,
+                    focused=(focus != "preview"),
                     filter_text=list_filter,
                     theme=theme,
+                    dim_all=(focus == "preview"),
                 ),
                 force=force_full,
             )
@@ -972,6 +1469,7 @@ def select_chat(
                     focused=(focus == "workspaces"),
                     filter_text=ws_filter,
                     theme=theme,
+                    dim_all=(focus == "preview"),
                 ),
                 force=force_full,
             )
@@ -987,20 +1485,41 @@ def select_chat(
                     focused=(focus == "chats"),
                     filter_text=chat_filter,
                     theme=theme,
+                    dim_all=(focus == "preview"),
                 ),
                 force=force_full,
             )
 
         if renderer.preview_pane is None:
             continue
-        renderer.preview_pane.draw_frame("Preview", focused=False, filter_text="", force=force_full)
-        renderer.preview_pane.draw_inner_rows(_preview_rows(layout.preview, ws, selected_chat, msg), force=force_full)
+        renderer.preview_pane.draw_frame("Preview", focused=(focus == "preview"), filter_text="", force=force_full)
+        if renderer.preview_pane.inner:
+            bottom_overlay = None
+            if focus == "preview" and preview_loading_more and preview_inner_h > 0 and preview_inner_w > 0:
+                bottom_overlay = ("Loading…", curses.A_DIM)
+            renderer.preview_pane.draw_preview_lines(
+                preview_lines,
+                preview_state.scroll,
+                use_terminal_scroll=(layout.mode == "1col"),
+                bottom_overlay=bottom_overlay,
+                force=force_full,
+            )
+        else:
+            renderer.preview_pane.draw_inner_rows(
+                _preview_rows(layout.preview, ws, selected_chat, msg, scroll=preview_state.scroll), force=force_full
+            )
 
         if renderer.status is None:
             continue
         renderer.status.draw(status, force=force_full)
 
-        curses.doupdate()
+        if sync_output:
+            _sync_output_begin()
+        try:
+            curses.doupdate()
+        finally:
+            if sync_output:
+                _sync_output_end()
 
         # Poll while background work is in progress, otherwise block on input.
         try:
@@ -1040,17 +1559,38 @@ def select_chat(
             return None
 
         if ch in (9,):  # Tab
-            focus = "chats" if focus == "workspaces" else "workspaces"
+            if focus == "workspaces":
+                focus = "chats"
+                last_list_focus = "chats"
+            elif focus == "chats":
+                focus = "preview"
+            else:
+                focus = "workspaces"
+                last_list_focus = "workspaces"
             continue
         if ch == curses.KEY_LEFT:
-            focus = "workspaces"
+            if focus == "preview":
+                focus = last_list_focus
+            elif focus == "chats":
+                focus = "workspaces"
+                last_list_focus = "workspaces"
+            else:
+                focus = "workspaces"
+                last_list_focus = "workspaces"
             continue
         if ch == curses.KEY_RIGHT:
-            focus = "chats"
+            if focus == "workspaces":
+                focus = "chats"
+                last_list_focus = "chats"
+            elif focus == "chats":
+                focus = "preview"
+            else:
+                focus = last_list_focus
             continue
 
         if ch in (ord("/"),):
-            input_mode = "ws" if focus == "workspaces" else "chat"
+            base = last_list_focus if focus == "preview" else focus
+            input_mode = "ws" if base == "workspaces" else "chat"
             continue
 
         # Mouse support (best-effort)
@@ -1077,6 +1617,13 @@ def select_chat(
             is_double = bool(btn1_double and (bstate & btn1_double))
             now = time.monotonic()
 
+            if layout.preview.contains(my, mx):
+                if delta:
+                    preview_state.move(delta, len(preview_lines), preview_view_h)
+                elif is_click:
+                    focus = "preview"
+                continue
+
             if layout.mode != "1col" and layout.workspaces.contains(my, mx):
                 if delta:
                     ws_state.move(delta, len(_filter_items(ws_items, ws_filter)))
@@ -1085,6 +1632,7 @@ def select_chat(
                     ws_state.selected = idx
                     ws_state.clamp(len(_filter_items(ws_items, ws_filter)))
                     focus = "workspaces"
+                    last_list_focus = "workspaces"
                     chat_state.selected = 0
                     chat_state.scroll = 0
                 continue
@@ -1097,6 +1645,7 @@ def select_chat(
                     chat_state.selected = idx
                     chat_state.clamp(len(_filter_items(chat_items, chat_filter)))
                     focus = "chats"
+                    last_list_focus = "chats"
 
                     if is_double or (
                         is_click
@@ -1121,20 +1670,21 @@ def select_chat(
 
             if layout.mode == "1col" and layout.workspaces.contains(my, mx):
                 if delta:
-                    if focus == "workspaces":
+                    if (last_list_focus if focus == "preview" else focus) == "workspaces":
                         ws_state.move(delta, len(_filter_items(ws_items, ws_filter)))
                     else:
                         chat_state.move(delta, len(_filter_items(chat_items, chat_filter)))
                     continue
 
-                idx = (ws_state.scroll if focus == "workspaces" else chat_state.scroll) + max(
-                    0, my - (layout.workspaces.y + 1)
-                )
-                if focus == "workspaces":
+                list_mode = last_list_focus if focus == "preview" else focus
+                idx = (ws_state.scroll if list_mode == "workspaces" else chat_state.scroll) + max(0, my - (layout.workspaces.y + 1))
+                if (last_list_focus if focus == "preview" else focus) == "workspaces":
                     ws_state.selected = idx
                     ws_state.clamp(len(_filter_items(ws_items, ws_filter)))
                     chat_state.selected = 0
                     chat_state.scroll = 0
+                    focus = "workspaces"
+                    last_list_focus = "workspaces"
                     if is_click:
                         last_click_at = now
                         last_click_target = ("workspaces", ws_state.selected)
@@ -1142,6 +1692,8 @@ def select_chat(
 
                 chat_state.selected = idx
                 chat_state.clamp(len(_filter_items(chat_items, chat_filter)))
+                focus = "chats"
+                last_list_focus = "chats"
                 if is_double or (
                     is_click and last_click_target == ("chats", chat_state.selected) and (now - last_click_at) <= 0.35
                 ):
@@ -1160,6 +1712,28 @@ def select_chat(
                     last_click_target = ("chats", chat_state.selected)
                 continue
 
+            continue
+
+        # Preview keyboard scrolling
+        if focus == "preview":
+            if ch in (curses.KEY_UP, ord("k")):
+                preview_state.move(-1, len(preview_lines), preview_view_h)
+                continue
+            if ch in (curses.KEY_DOWN, ord("j")):
+                preview_state.move(1, len(preview_lines), preview_view_h)
+                continue
+            if ch == curses.KEY_PPAGE:
+                preview_state.page(-1, len(preview_lines), preview_view_h)
+                continue
+            if ch == curses.KEY_NPAGE:
+                preview_state.page(1, len(preview_lines), preview_view_h)
+                continue
+            if ch == curses.KEY_HOME:
+                preview_state.scroll = 0
+                continue
+            if ch == curses.KEY_END:
+                preview_state.scroll = max(0, len(preview_lines) - max(1, preview_view_h))
+                continue
             continue
 
         # Keyboard navigation

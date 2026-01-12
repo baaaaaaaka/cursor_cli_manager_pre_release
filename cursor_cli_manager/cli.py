@@ -18,6 +18,7 @@ from cursor_cli_manager.agent_paths import (
 )
 from cursor_cli_manager.agent_store import extract_recent_messages, format_messages_preview
 from cursor_cli_manager.models import AgentChat, AgentWorkspace
+from cursor_cli_manager.agent_store import extract_initial_messages
 from cursor_cli_manager.opening import build_resume_command, exec_new_chat, exec_resume_chat, resolve_cursor_agent_path
 from cursor_cli_manager.agent_workspace_map import (
     learn_workspace_path,
@@ -25,7 +26,7 @@ from cursor_cli_manager.agent_workspace_map import (
     try_learn_current_cwd,
     workspace_map_path,
 )
-from cursor_cli_manager.tui import select_chat
+from cursor_cli_manager.tui import probe_synchronized_output_support, select_chat
 
 
 def _workspace_to_json(ws: AgentWorkspace) -> Dict[str, Any]:
@@ -112,19 +113,42 @@ def _run_tui(
     agent_dirs: CursorAgentDirs,
     workspaces: List[AgentWorkspace],
 ) -> Optional[Tuple[AgentWorkspace, Optional[AgentChat]]]:
+    # Best-effort: enable xterm synchronized output only when we can confirm support.
+    # This can reduce flicker on some terminals, and is a no-op when disabled.
+    sync_output = False
+    try:
+        sync_output = probe_synchronized_output_support(timeout_s=0.05)
+    except Exception:
+        sync_output = False
+
     def _inner(stdscr: "curses.window") -> Optional[Tuple[AgentWorkspace, Optional[AgentChat]]]:
         return select_chat(
             stdscr,
             workspaces=workspaces,
             load_chats=lambda ws: discover_agent_chats(ws, with_preview=False),
-            load_preview=lambda chat: (
+            load_preview_snippet=lambda chat, max_messages: (
                 (
                     "history",
-                    format_messages_preview(extract_recent_messages(chat.store_db_path, max_messages=8)),
+                    format_messages_preview(
+                        extract_initial_messages(chat.store_db_path, max_messages=max_messages, max_blobs=None),
+                        max_chars_per_message=0,
+                    ),
                 )
                 if chat.latest_root_blob_id
                 else (None, None)
             ),
+            load_preview_full=lambda chat: (
+                (
+                    "history",
+                    format_messages_preview(
+                        extract_recent_messages(chat.store_db_path, max_messages=None, max_blobs=None),
+                        max_chars_per_message=0,
+                    ),
+                )
+                if chat.latest_root_blob_id
+                else (None, None)
+            ),
+            sync_output=sync_output,
         )
 
     return curses.wrapper(_inner)

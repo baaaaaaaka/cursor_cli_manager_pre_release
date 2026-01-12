@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from typing import Dict
 
-from cursor_cli_manager.vscdb import read_json, read_value
+from cursor_cli_manager.vscdb import VscdbError, read_json, read_value
 
 
 def _make_vscdb(db_path: Path, items: Dict[str, object]) -> None:
@@ -40,6 +40,13 @@ class TestVscdb(unittest.TestCase):
             db = Path(td) / "state.vscdb"
             _make_vscdb(db, {"j": json.dumps({"a": 2}).encode("utf-8")})
             self.assertEqual(read_json(db, "j"), {"a": 2})
+
+    def test_read_json_invalid_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "state.vscdb"
+            _make_vscdb(db, {"bad": "not json"})
+            with self.assertRaises(VscdbError):
+                read_json(db, "bad")
 
 
 if __name__ == "__main__":
