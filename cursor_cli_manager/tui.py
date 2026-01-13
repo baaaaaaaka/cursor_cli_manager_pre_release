@@ -1182,10 +1182,11 @@ def select_chat(
         def _run() -> None:
             nonlocal update_checking
             try:
-                st = check_for_update()
+                st = check_for_update(timeout_s=8.0)
                 update_q.put(st)
             except Exception:
-                pass
+                # Mark as "can't check" so the UI doesn't look stuck.
+                update_q.put(UpdateStatus(supported=False, error="update check failed"))
             finally:
                 update_checking = False
 
@@ -1483,7 +1484,10 @@ def select_chat(
         # - Update available: bold keybinding hint
         update_right = f"v{__version__}"
         update_right_attr = 0
-        if update_status and update_status.supported:
+        if update_status is None:
+            if update_checking:
+                update_right = f"v{__version__} checking"
+        elif update_status.supported:
             if update_status.update_available:
                 update_right = f"v{__version__}  Ctrl+U upgrade"
                 update_right_attr = curses.A_BOLD

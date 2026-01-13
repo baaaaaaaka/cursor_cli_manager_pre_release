@@ -23,10 +23,10 @@ class TestUpdatePep610(unittest.TestCase):
     def _make_pep610_layout(self, base: Path, *, direct_url: dict) -> Path:
         # Simulate site-packages layout:
         #   base/cursor_cli_manager/ (package_dir)
-        #   base/cursor_cli_manager-0.5.0.dist-info/direct_url.json
+        #   base/cursor_cli_manager-0.5.1.dist-info/direct_url.json
         pkg = base / "cursor_cli_manager"
         pkg.mkdir(parents=True, exist_ok=True)
-        dist = base / "cursor_cli_manager-0.5.0.dist-info"
+        dist = base / "cursor_cli_manager-0.5.1.dist-info"
         dist.mkdir(parents=True, exist_ok=True)
         (dist / "direct_url.json").write_text(json.dumps(direct_url), encoding="utf-8")
         return pkg
@@ -65,6 +65,19 @@ class TestUpdatePep610(unittest.TestCase):
             self.assertTrue(st.update_available)
             self.assertEqual(st.installed_commit, "old")
             self.assertEqual(st.remote_commit, "deadbeef")
+
+    def test_check_for_update_timeout_is_treated_as_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            pkg = self._make_pep610_layout(
+                Path(td),
+                direct_url={
+                    "url": "https://example.com/repo.git",
+                    "vcs_info": {"vcs": "git", "commit_id": "old", "requested_revision": "main"},
+                },
+            )
+            run = _FakeRun({("git", "ls-remote", "https://example.com/repo.git", "main"): (124, "", "timeout")})
+            st = check_for_update(package_dir=pkg, run=run, timeout_s=0.1)
+            self.assertFalse(st.supported)
 
     def test_build_vcs_requirement_supports_subdirectory(self) -> None:
         with tempfile.TemporaryDirectory() as td:

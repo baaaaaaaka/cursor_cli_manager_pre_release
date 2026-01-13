@@ -32,16 +32,28 @@ def _default_runner(cmd: Sequence[str], timeout_s: float) -> Tuple[int, str, str
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
     # Reduce noise/latency.
     env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
-    p = subprocess.run(
-        list(cmd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=timeout_s,
-        check=False,
-        env=env,
-    )
-    return p.returncode, p.stdout, p.stderr
+    try:
+        p = subprocess.run(
+            list(cmd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+            env=env,
+        )
+        return p.returncode, p.stdout, p.stderr
+    except subprocess.TimeoutExpired as e:
+        out = ""
+        err = "timeout"
+        try:
+            if isinstance(getattr(e, "stdout", None), str):
+                out = e.stdout  # type: ignore[assignment]
+            if isinstance(getattr(e, "stderr", None), str):
+                err = e.stderr or err  # type: ignore[assignment]
+        except Exception:
+            pass
+        return 124, out, err
 
 
 def _git(args: List[str], *, timeout_s: float, run: Runner) -> Tuple[int, str, str]:
