@@ -20,7 +20,7 @@ This project targets **macOS first**, with **Linux** support best-effort.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip3 install -e .
 ```
 
 After installing, you will get two command names:
@@ -32,10 +32,10 @@ After installing, you will get two command names:
 
 ```bash
 # HTTPS (recommended)
-pip install "cursor-cli-manager @ git+https://github.com/baaaaaaaka/cursor_cli_manager@main"
+pip3 install "cursor-cli-manager @ git+https://github.com/baaaaaaaka/cursor_cli_manager@main"
 
 # or pin to a commit:
-pip install "cursor-cli-manager @ git+https://github.com/baaaaaaaka/cursor_cli_manager.git@<commit_sha>"
+pip3 install "cursor-cli-manager @ git+https://github.com/baaaaaaaka/cursor_cli_manager.git@<commit_sha>"
 ```
 
 ## Run
