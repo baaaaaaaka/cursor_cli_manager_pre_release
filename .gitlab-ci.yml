@@ -1,0 +1,28 @@
+stages: [test]
+
+unit_tests:
+  stage: test
+  parallel:
+    matrix:
+      - PYTHON_IMAGE: ["python:3.7", "python:3.12"]
+  image: $PYTHON_IMAGE
+  variables:
+    TERM: xterm-256color
+    PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  cache:
+    key: pip
+    paths:
+      - .cache/pip
+  script:
+    - python -V
+    - python -m pip install -U "setuptools<69" wheel
+    - |
+      if python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 7) else 1)"; then
+        # pip 24+ dropped Python 3.7 support.
+        python -m pip install -U "pip<24"
+      else
+        python -m pip install -U pip
+      fi
+    - python -m pip install -e .
+    - python -m unittest discover -s tests -p "test_*.py" -v
+

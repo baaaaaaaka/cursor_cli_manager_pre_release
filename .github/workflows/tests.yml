@@ -1,0 +1,43 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unittest:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Oldest supported Python: keep the OS stable.
+          - os: ubuntu-22.04
+            python: "3.7"
+          # Mainline Python: cover Linux + macOS.
+          - os: ubuntu-latest
+            python: "3.12"
+          - os: macos-latest
+            python: "3.12"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install and run unit tests
+        env:
+          TERM: xterm-256color
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
+        run: |
+          python -m pip install -U "setuptools<69" wheel
+          if [ "${{ matrix.python }}" = "3.7" ]; then
+            # pip 24+ dropped Python 3.7 support.
+            python -m pip install -U "pip<24"
+          else
+            python -m pip install -U pip
+          fi
+          python -m pip install -e .
+          python -m unittest discover -s tests -p "test_*.py" -v
+
