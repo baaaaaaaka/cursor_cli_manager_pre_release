@@ -201,6 +201,7 @@ def cmd_tui(agent_dirs: CursorAgentDirs) -> int:
     while True:
         try:
             selection = _run_tui(agent_dirs, workspaces)
+            break
         except UpdateRequested:
             ok, out = perform_update(python=sys.executable)
             if out:
