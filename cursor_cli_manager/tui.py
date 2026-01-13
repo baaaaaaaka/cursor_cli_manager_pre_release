@@ -556,6 +556,30 @@ class UpdateRequested(Exception):
     """
 
 
+def _input_timeout_ms(*, bg_pending: bool, update_checking: bool) -> int:
+    """
+    Decide the curses input timeout.
+
+    If we have background work (chat/preview loaders or version-check) we need
+    to keep the UI loop ticking to apply results and refresh the screen.
+    """
+    return 80 if (bg_pending or update_checking) else -1
+
+
+def _is_quit_key(ch: int) -> bool:
+    """
+    Quit keys must be ignored while in search input mode.
+    """
+    key_exit = getattr(curses, "KEY_EXIT", None)
+    if isinstance(key_exit, int) and ch == key_exit:
+        return True
+    return ch in (ord("q"), ord("Q"))
+
+
+def _should_quit(*, ch: int, input_mode: Optional[str]) -> bool:
+    return (input_mode is None) and _is_quit_key(ch)
+
+
 def _safe_addstr(win: "curses.window", y: int, x: int, s: str, attr: int = 0) -> None:
     try:
         win.addstr(y, x, s, attr)
@@ -1613,7 +1637,7 @@ def select_chat(
 
         # Poll while background work is in progress, otherwise block on input.
         try:
-            stdscr.timeout(80 if bg.has_pending() else -1)
+            stdscr.timeout(_input_timeout_ms(bg_pending=bg.has_pending(), update_checking=update_checking))
         except Exception:
             pass
 
@@ -1623,6 +1647,9 @@ def select_chat(
 
         if ch == curses.KEY_RESIZE:
             continue
+
+        if _should_quit(ch=ch, input_mode=input_mode):
+            return None
 
         if input_mode:
             if ch in (27,):  # ESC
@@ -1644,9 +1671,6 @@ def select_chat(
                     chat_filter += chr(ch)
                 continue
             continue
-
-        if ch in (ord("q"), ord("Q")):
-            return None
 
         # Ctrl+U: upgrade (when we can safely fast-forward)
         if ch == 21:  # ^U

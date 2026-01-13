@@ -1,15 +1,74 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
+import threading
 from pathlib import Path
 from typing import List, Optional
+
+from cursor_cli_manager.update import _default_runner
 
 
 ENV_CURSOR_AGENT_PATH = "CURSOR_AGENT_PATH"
 
 # Default cursor-agent flags we want enabled for interactive runs.
 DEFAULT_CURSOR_AGENT_FLAGS = ["--approve-mcps", "--browser"]
+
+
+_PROBE_LOCK = threading.Lock()
+_PROBE_STARTED = False
+_PROBED_CURSOR_AGENT_FLAGS: Optional[List[str]] = None
+
+
+def _help_supports_flag(help_text: str, flag: str) -> bool:
+    # Match "--flag" as a standalone token in help output.
+    # Allow common separators after a flag: whitespace, comma, "=", or "[".
+    pat = r"(^|\s)" + re.escape(flag) + r"(\s|,|=|\[|$)"
+    return bool(re.search(pat, help_text or "", flags=re.MULTILINE))
+
+
+def start_cursor_agent_flag_probe(*, timeout_s: float = 1.0) -> None:
+    """
+    Best-effort, non-blocking probe to detect which optional flags are supported.
+
+    This is intentionally async: if the probe hasn't finished when the user opens
+    a chat, we do NOT block.
+    """
+    global _PROBE_STARTED
+    with _PROBE_LOCK:
+        if _PROBE_STARTED:
+            return
+        _PROBE_STARTED = True
+
+    def _run() -> None:
+        global _PROBED_CURSOR_AGENT_FLAGS
+        try:
+            agent = resolve_cursor_agent_path()
+            if not agent:
+                return
+            rc, out, err = _default_runner([agent, "--help"], timeout_s)
+            if rc != 0:
+                # Leave as unknown; we will keep using defaults.
+                return
+            txt = (out or "") + ("\n" if out and err else "") + (err or "")
+            supported: List[str] = []
+            for flag in DEFAULT_CURSOR_AGENT_FLAGS:
+                if _help_supports_flag(txt, flag):
+                    supported.append(flag)
+            _PROBED_CURSOR_AGENT_FLAGS = supported
+        except Exception:
+            return
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def get_cursor_agent_flags() -> List[str]:
+    """
+    Optional flags to pass to cursor-agent (best-effort).
+    """
+    probed = _PROBED_CURSOR_AGENT_FLAGS
+    return list(probed) if probed is not None else list(DEFAULT_CURSOR_AGENT_FLAGS)
 
 
 def resolve_cursor_agent_path(explicit: Optional[str] = None) -> Optional[str]:
@@ -55,7 +114,7 @@ def build_resume_command(
     cmd: List[str] = [agent]
     if workspace_path is not None:
         cmd.extend(["--workspace", str(workspace_path)])
-    cmd.extend(DEFAULT_CURSOR_AGENT_FLAGS)
+    cmd.extend(get_cursor_agent_flags())
     cmd.extend(["--resume", chat_id])
     return cmd
 
@@ -75,7 +134,7 @@ def build_new_command(
     cmd: List[str] = [agent]
     if workspace_path is not None:
         cmd.extend(["--workspace", str(workspace_path)])
-    cmd.extend(DEFAULT_CURSOR_AGENT_FLAGS)
+    cmd.extend(get_cursor_agent_flags())
     return cmd
 
 

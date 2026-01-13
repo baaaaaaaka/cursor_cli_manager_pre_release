@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,28 +33,51 @@ def _default_runner(cmd: Sequence[str], timeout_s: float) -> Tuple[int, str, str
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
     # Reduce noise/latency.
     env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+    p: Optional[subprocess.Popen] = None
     try:
-        p = subprocess.run(
+        # Important:
+        # - start_new_session=True prevents the child (git/ssh/pip) from inheriting the controlling TTY.
+        # - stdin=DEVNULL avoids accidental reads from stdin.
+        p = subprocess.Popen(
             list(cmd),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout_s,
-            check=False,
             env=env,
+            start_new_session=True,
         )
-        return p.returncode, p.stdout, p.stderr
-    except subprocess.TimeoutExpired as e:
+        out, err = p.communicate(timeout=timeout_s)
+        return p.returncode or 0, out or "", err or ""
+    except subprocess.TimeoutExpired:
+        # Best-effort: terminate the whole process group so helpers (e.g. ssh) don't linger.
         out = ""
-        err = "timeout"
-        try:
-            if isinstance(getattr(e, "stdout", None), str):
-                out = e.stdout  # type: ignore[assignment]
-            if isinstance(getattr(e, "stderr", None), str):
-                err = e.stderr or err  # type: ignore[assignment]
-        except Exception:
-            pass
-        return 124, out, err
+        err = ""
+        if p is not None:
+            try:
+                os.killpg(p.pid, signal.SIGTERM)
+            except Exception:
+                pass
+            try:
+                out, err = p.communicate(timeout=0.2)
+            except Exception:
+                out, err = "", ""
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+            try:
+                out2, err2 = p.communicate(timeout=0.2)
+                out = (out or "") + (out2 or "")
+                err = (err or "") + (err2 or "")
+            except Exception:
+                pass
+        return 124, (out or "").strip(), (err or "timeout").strip() or "timeout"
+    except Exception as e:
+        return 1, "", str(e)
 
 
 def _git(args: List[str], *, timeout_s: float, run: Runner) -> Tuple[int, str, str]:

@@ -26,7 +26,9 @@ class TestCmdTuiQuit(unittest.TestCase):
 
         with patch("cursor_cli_manager.cli.discover_agent_workspaces", return_value=[ws]), patch(
             "cursor_cli_manager.cli._pin_cwd_workspace", return_value=[ws]
-        ), patch("cursor_cli_manager.cli._run_tui", side_effect=fake_run_tui):
+        ), patch("cursor_cli_manager.cli._run_tui", side_effect=fake_run_tui), patch(
+            "cursor_cli_manager.cli.start_cursor_agent_flag_probe"
+        ):
             from cursor_cli_manager.cli import cmd_tui
 
             rc = cmd_tui(agent_dirs)

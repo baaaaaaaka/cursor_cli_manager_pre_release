@@ -20,7 +20,13 @@ from cursor_cli_manager.agent_paths import (
 from cursor_cli_manager.agent_store import extract_recent_messages, format_messages_preview
 from cursor_cli_manager.models import AgentChat, AgentWorkspace
 from cursor_cli_manager.agent_store import extract_initial_messages
-from cursor_cli_manager.opening import build_resume_command, exec_new_chat, exec_resume_chat, resolve_cursor_agent_path
+from cursor_cli_manager.opening import (
+    build_resume_command,
+    exec_new_chat,
+    exec_resume_chat,
+    resolve_cursor_agent_path,
+    start_cursor_agent_flag_probe,
+)
 from cursor_cli_manager.agent_workspace_map import (
     learn_workspace_path,
     load_workspace_map,
@@ -189,6 +195,9 @@ def _pin_cwd_workspace(agent_dirs: CursorAgentDirs, workspaces: List[AgentWorksp
 
 
 def cmd_tui(agent_dirs: CursorAgentDirs) -> int:
+    # Non-blocking: probe cursor-agent optional flags in background while the user browses the TUI.
+    start_cursor_agent_flag_probe()
+
     # Hide chats whose original workspace folder no longer exists.
     workspaces = _pin_cwd_workspace(
         agent_dirs,
