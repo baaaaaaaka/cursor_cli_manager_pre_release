@@ -16,14 +16,6 @@ This project targets **macOS** and **Linux**.
 
 ## Install
 
-### From source (recommended for development)
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip3 install -e .
-```
-
 After installing, you will get two command names:
 
 - `ccm`
@@ -39,20 +31,31 @@ pip3 install "cursor-cli-manager @ git+https://github.com/baaaaaaaka/cursor_cli_
 pip3 install "cursor-cli-manager @ git+https://github.com/baaaaaaaka/cursor_cli_manager.git@<commit_sha>"
 ```
 
-## Run
-
-From the repo root:
+### From source
 
 ```bash
-python3 -m cursor_cli_manager
+git clone https://github.com/baaaaaaaka/cursor_cli_manager.git
+cd cursor_cli_manager
+
+pip3 install -e .
+
+cd ..
+rm -rf cursor_cli_manager
 ```
 
-Or (after installing as a package):
+## Run
 
+After installing as a package:
 ```bash
 ccm
 # or
 cursor-cli-manager
+```
+
+Or from the repo root:
+
+```bash
+python3 -m cursor_cli_manager
 ```
 
 ## TUI controls
