@@ -26,7 +26,35 @@ jobs:
             quay.io/pypa/manylinux2014_x86_64:latest \
             /bin/bash -lc '
               set -euxo pipefail
-              PY=/opt/python/cp311-cp311/bin/python
+              # manylinux CPython is built without shared libpython (PyInstaller requires shared),
+              # so we build a shared CPython against a local OpenSSL first.
+              yum -y install perl-IPC-Cmd libffi-devel >/dev/null
+
+              OPENSSL_VER=3.0.13
+              PYVER=3.11.14
+
+              cd /tmp
+              curl -fsSLO https://www.openssl.org/source/openssl-${OPENSSL_VER}.tar.gz
+              tar -xf openssl-${OPENSSL_VER}.tar.gz
+              cd openssl-${OPENSSL_VER}
+              ./Configure linux-x86_64 --prefix=/tmp/openssl --openssldir=/tmp/openssl --libdir=lib shared zlib
+              make -j"$(nproc)"
+              make install_sw
+
+              cd /tmp
+              curl -fsSLO https://www.python.org/ftp/python/${PYVER}/Python-${PYVER}.tgz
+              tar -xf Python-${PYVER}.tgz
+              cd Python-${PYVER}
+              export CPPFLAGS="-I/tmp/openssl/include"
+              export LDFLAGS="-L/tmp/openssl/lib"
+              # Ensure build-time import tests can load libssl/libcrypto.
+              export LD_LIBRARY_PATH="/tmp/openssl/lib"
+              ./configure --prefix=/tmp/python --enable-shared --with-openssl=/tmp/openssl --with-openssl-rpath=no --with-ensurepip=install
+              make -j"$(nproc)"
+              make install
+
+              export LD_LIBRARY_PATH="/tmp/python/lib:/tmp/openssl/lib"
+              PY=/tmp/python/bin/python3
               $PY -m pip install -U pip "setuptools<69" wheel pyinstaller
               $PY -m pip install -e .
               $PY -m PyInstaller --clean -F -n ccm cursor_cli_manager/__main__.py
@@ -40,7 +68,7 @@ jobs:
           path: out/ccm-linux-x86_64-glibc217
 
   build-macos-x86_64:
-    runs-on: macos-13
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -63,7 +91,7 @@ jobs:
           path: out/ccm-macos-x86_64
 
   build-macos-arm64:
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
