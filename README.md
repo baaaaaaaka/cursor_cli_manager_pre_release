@@ -103,6 +103,15 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 - `CURSOR_AGENT_PATH`: override the `cursor-agent` executable path
 - `CURSOR_AGENT_CONFIG_DIR`: override the config dir (default: `~/.cursor`)
 - `--config-dir <dir>`: override the config dir (same effect as `CURSOR_AGENT_CONFIG_DIR`)
+- `CCM_PATCH_CURSOR_AGENT_MODELS=1`: patch cursor-agent bundles before launching so `/model` / `--list-models` prefer "AvailableModels" (best-effort)
+- `CCM_CURSOR_AGENT_VERSIONS_DIR`: override the cursor-agent `versions/` directory (used for model patching)
+- `CURSOR_AGENT_VERSIONS_DIR`: same as above (fallback)
+
+You can also run the patch explicitly:
+
+```bash
+ccm patch-models
+```
 
 ## Versioning policy
 

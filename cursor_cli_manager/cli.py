@@ -27,6 +27,14 @@ from cursor_cli_manager.opening import (
     resolve_cursor_agent_path,
     start_cursor_agent_flag_probe,
 )
+from cursor_cli_manager.agent_patching import (
+    ENV_CCM_CURSOR_AGENT_VERSIONS_DIR,
+    ENV_CCM_PATCH_CURSOR_AGENT_MODELS,
+    ENV_CURSOR_AGENT_VERSIONS_DIR,
+    patch_cursor_agent_models,
+    resolve_cursor_agent_versions_dir,
+    should_patch_models,
+)
 from cursor_cli_manager.agent_workspace_map import (
     learn_workspace_path,
     load_workspace_map,
@@ -92,6 +100,16 @@ def cmd_doctor(agent_dirs: CursorAgentDirs) -> int:
     print(f"- cursor-agent: {agent or 'NOT FOUND'}")
     print(f"- Tip: set ${ENV_CURSOR_AGENT_CONFIG_DIR} to override config dir")
 
+    vdir = resolve_cursor_agent_versions_dir(cursor_agent_path=agent)
+    print(f"- versions dir: {vdir or 'NOT FOUND'}")
+    if vdir is not None:
+        # Doctor should not modify anything; just report best-effort patchability.
+        rep = patch_cursor_agent_models(versions_dir=vdir, dry_run=True)
+        print(
+            f"- model patch dry-run: would_patch={len(rep.patched_files)} already_patched={rep.skipped_already_patched} "
+            f"not_applicable={rep.skipped_not_applicable} errors={len(rep.errors)}"
+        )
+
     try:
         workspaces = discover_agent_workspaces(agent_dirs)
         total_chats = sum(len(discover_agent_chats(ws)) for ws in workspaces)
@@ -110,12 +128,27 @@ def cmd_doctor(agent_dirs: CursorAgentDirs) -> int:
     return 0
 
 
-def cmd_open(agent_dirs: CursorAgentDirs, chat_id: str, *, workspace_path: Optional[Path], dry_run: bool) -> int:
+def cmd_open(
+    agent_dirs: CursorAgentDirs,
+    chat_id: str,
+    *,
+    workspace_path: Optional[Path],
+    dry_run: bool,
+    patch_models: bool = False,
+    cursor_agent_versions_dir: Optional[str] = None,
+) -> int:
     if workspace_path is None:
         print("Error: --workspace is required (cursor-agent chats are grouped by cwd).")
         return 2
     # Learning from explicit workspace path improves mapping without requiring user to cd first.
     learn_workspace_path(agent_dirs, workspace_path)
+    if patch_models and not dry_run:
+        vdir = resolve_cursor_agent_versions_dir(
+            explicit=cursor_agent_versions_dir,
+            cursor_agent_path=resolve_cursor_agent_path(),
+        )
+        if vdir is not None:
+            patch_cursor_agent_models(versions_dir=vdir, dry_run=False)
     cmd = build_resume_command(chat_id, workspace_path=workspace_path)
     if dry_run:
         # Display as a shell-friendly snippet.
@@ -206,9 +239,21 @@ def _pin_cwd_workspace(agent_dirs: CursorAgentDirs, workspaces: List[AgentWorksp
     return [cwd_ws] + rest
 
 
-def cmd_tui(agent_dirs: CursorAgentDirs) -> int:
+def cmd_tui(
+    agent_dirs: CursorAgentDirs,
+    *,
+    patch_models: bool = False,
+    cursor_agent_versions_dir: Optional[str] = None,
+) -> int:
     # Non-blocking: probe cursor-agent optional flags in background while the user browses the TUI.
     start_cursor_agent_flag_probe()
+    if patch_models:
+        vdir = resolve_cursor_agent_versions_dir(
+            explicit=cursor_agent_versions_dir,
+            cursor_agent_path=resolve_cursor_agent_path(),
+        )
+        if vdir is not None:
+            patch_cursor_agent_models(versions_dir=vdir, dry_run=False)
 
     # Hide chats whose original workspace folder no longer exists.
     workspaces = _pin_cwd_workspace(
@@ -275,6 +320,27 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=None,
         help=f"Override cursor-agent config dir (or set ${ENV_CURSOR_AGENT_CONFIG_DIR}).",
     )
+    p_patch_flag = parser.add_mutually_exclusive_group()
+    p_patch_flag.add_argument(
+        "--patch-models",
+        dest="patch_models",
+        action="store_true",
+        default=None,
+        help=f"Enable cursor-agent model patching (default; can also use ${ENV_CCM_PATCH_CURSOR_AGENT_MODELS}).",
+    )
+    p_patch_flag.add_argument(
+        "--no-patch-models",
+        dest="patch_models",
+        action="store_false",
+        default=None,
+        help=f"Disable cursor-agent model patching (or set {ENV_CCM_PATCH_CURSOR_AGENT_MODELS}=0).",
+    )
+    parser.add_argument(
+        "--cursor-agent-versions-dir",
+        dest="cursor_agent_versions_dir",
+        default=None,
+        help=f"Override cursor-agent versions dir (or set ${ENV_CCM_CURSOR_AGENT_VERSIONS_DIR} / ${ENV_CURSOR_AGENT_VERSIONS_DIR}).",
+    )
 
     sub = parser.add_subparsers(dest="command")
 
@@ -291,6 +357,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_open.add_argument("--workspace", dest="workspace", default=None, help="Workspace folder path (required).")
     p_open.add_argument("--dry-run", action="store_true", help="Print command instead of executing.")
 
+    p_patch = sub.add_parser("patch-models", help="Patch cursor-agent bundles to prefer AvailableModels.")
+    p_patch.add_argument("--dry-run", action="store_true", help="Scan and report without writing.")
+
     args = parser.parse_args(argv)
 
     if args.config_dir:
@@ -303,14 +372,44 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     cmd = args.command or "tui"
     if cmd == "tui":
-        return cmd_tui(agent_dirs)
+        return cmd_tui(
+            agent_dirs,
+            patch_models=should_patch_models(explicit=getattr(args, "patch_models", None)),
+            cursor_agent_versions_dir=getattr(args, "cursor_agent_versions_dir", None),
+        )
     if cmd == "list":
         return cmd_list(agent_dirs, pretty=bool(args.pretty), with_preview=bool(args.with_preview))
     if cmd == "doctor":
         return cmd_doctor(agent_dirs)
     if cmd == "open":
         ws_path = Path(args.workspace).expanduser() if args.workspace else None
-        return cmd_open(agent_dirs, args.chat_id, workspace_path=ws_path, dry_run=bool(args.dry_run))
+        return cmd_open(
+            agent_dirs,
+            args.chat_id,
+            workspace_path=ws_path,
+            dry_run=bool(args.dry_run),
+            patch_models=should_patch_models(explicit=getattr(args, "patch_models", None)),
+            cursor_agent_versions_dir=getattr(args, "cursor_agent_versions_dir", None),
+        )
+    if cmd == "patch-models":
+        vdir = resolve_cursor_agent_versions_dir(
+            explicit=getattr(args, "cursor_agent_versions_dir", None),
+            cursor_agent_path=resolve_cursor_agent_path(),
+        )
+        if vdir is None:
+            print("cursor-agent versions dir not found. Set --cursor-agent-versions-dir or $CCM_CURSOR_AGENT_VERSIONS_DIR.")
+            return 2
+        rep = patch_cursor_agent_models(versions_dir=vdir, dry_run=bool(getattr(args, "dry_run", False)))
+        print(f"versions dir: {vdir}")
+        print(f"scanned_files: {rep.scanned_files}")
+        print(f"patched_files: {len(rep.patched_files)}")
+        print(f"already_patched: {rep.skipped_already_patched}")
+        print(f"not_applicable: {rep.skipped_not_applicable}")
+        if rep.errors:
+            print(f"errors: {len(rep.errors)}")
+            for p, e in rep.errors[:10]:
+                print(f"- {p}: {e}")
+        return 0 if rep.ok else 1
 
     parser.print_help()
     return 2
