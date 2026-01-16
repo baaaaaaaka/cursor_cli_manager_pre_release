@@ -1,0 +1,38 @@
+name: linux-builder-image
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "docker/linux-builder/**"
+      - ".github/workflows/linux_builder_image.yml"
+
+permissions:
+  packages: write
+  contents: read
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push builder image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/linux-builder/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/baaaaaaaka/ccm-linux-builder:py311
+            ghcr.io/baaaaaaaka/ccm-linux-builder:latest
+

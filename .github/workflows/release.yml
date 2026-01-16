@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  packages: read
 
 jobs:
   build-linux-x86_64-glibc217:
@@ -15,52 +16,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build linux binary (manylinux2014)
+      - name: Log in to GHCR (pull builder image)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build linux binary (builder image)
+        env:
+          CCM_LINUX_BUILDER_IMAGE: ghcr.io/baaaaaaaka/ccm-linux-builder:py311
         run: |
           set -euxo pipefail
-          mkdir -p out
-          docker pull quay.io/pypa/manylinux2014_x86_64:latest
-          docker run --rm \
-            -v "${GITHUB_WORKSPACE}:/work" \
-            -w /work \
-            quay.io/pypa/manylinux2014_x86_64:latest \
-            /bin/bash -lc '
-              set -euxo pipefail
-              # manylinux CPython is built without shared libpython (PyInstaller requires shared),
-              # so we build a shared CPython against a local OpenSSL first.
-              yum -y install perl-IPC-Cmd libffi-devel >/dev/null
-
-              OPENSSL_VER=3.0.13
-              PYVER=3.11.14
-
-              cd /tmp
-              curl -fsSLO https://www.openssl.org/source/openssl-${OPENSSL_VER}.tar.gz
-              tar -xf openssl-${OPENSSL_VER}.tar.gz
-              cd openssl-${OPENSSL_VER}
-              ./Configure linux-x86_64 --prefix=/tmp/openssl --openssldir=/tmp/openssl --libdir=lib shared zlib
-              make -j"$(nproc)"
-              make install_sw
-
-              cd /tmp
-              curl -fsSLO https://www.python.org/ftp/python/${PYVER}/Python-${PYVER}.tgz
-              tar -xf Python-${PYVER}.tgz
-              cd Python-${PYVER}
-              export CPPFLAGS="-I/tmp/openssl/include"
-              export LDFLAGS="-L/tmp/openssl/lib"
-              # Ensure build-time import tests can load libssl/libcrypto.
-              export LD_LIBRARY_PATH="/tmp/openssl/lib"
-              ./configure --prefix=/tmp/python --enable-shared --with-openssl=/tmp/openssl --with-openssl-rpath=no --with-ensurepip=install
-              make -j"$(nproc)"
-              make install
-
-              export LD_LIBRARY_PATH="/tmp/python/lib:/tmp/openssl/lib"
-              PY=/tmp/python/bin/python3
-              $PY -m pip install -U pip "setuptools<69" wheel pyinstaller
-              $PY -m pip install -e .
-              $PY -m PyInstaller --clean -F -n ccm cursor_cli_manager/__main__.py
-              cp dist/ccm out/ccm-linux-x86_64-glibc217
-              chmod 755 out/ccm-linux-x86_64-glibc217
-            '
+          bash scripts/build_linux_binary_docker.sh
 
       - uses: actions/upload-artifact@v4
         with:
