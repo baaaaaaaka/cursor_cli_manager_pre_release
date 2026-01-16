@@ -98,8 +98,10 @@ class TestUpdateGithubRelease(unittest.TestCase):
             exe_link.symlink_to(root / "current" / "ccm" / "ccm")
 
             def fake_install(**kwargs):
-                self.assertEqual(kwargs["bin_dir"], bin_dir)
-                self.assertEqual(kwargs["install_root"], root)
+                # macOS temp dirs may appear as /var/... vs /private/var/... (symlinked),
+                # so normalize via resolve() for stable assertions.
+                self.assertEqual(Path(kwargs["bin_dir"]).resolve(), bin_dir.resolve())
+                self.assertEqual(Path(kwargs["install_root"]).resolve(), root.resolve())
                 return exe_real
 
             with patch.dict(os.environ, {}, clear=True), patch.object(
