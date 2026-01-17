@@ -71,6 +71,92 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+is_runnable_ccm() {
+  # The bundle entrypoint must be a real executable file, not a symlink.
+  # (A self-referential symlink would trigger ELOOP at runtime.)
+  if [ ! -f "${TARGET}" ]; then
+    return 1
+  fi
+  if [ ! -x "${TARGET}" ]; then
+    return 1
+  fi
+  # -L is widely supported (dash/bash/zsh); treat symlink as broken.
+  if [ -L "${TARGET}" ]; then
+    return 1
+  fi
+  return 0
+}
+
+install_once() {
+  TAG_RESOLVED="$(resolve_tag)"
+  VERSIONS_DIR="${ROOT_DIR%/}/versions"
+  if [ "${TAG_RESOLVED}" = "latest" ] && [ -z "${CCM_INSTALL_FROM_DIR:-}" ]; then
+    # Avoid reusing a potentially broken "versions/latest" directory.
+    TAG_RESOLVED="latest-$(date +%s)"
+  fi
+  FINAL_DIR="${VERSIONS_DIR%/}/${TAG_RESOLVED}"
+  CURRENT_LINK="${ROOT_DIR%/}/current"
+
+  # Extract bundle into a temp dir under versions/ (so final rename stays on the same filesystem).
+  TMP_DIR="$(mktemp -d "${VERSIONS_DIR%/}/.ccm.extract.XXXXXX")"
+  if command -v tar >/dev/null 2>&1; then
+    tar -xzf "${TMP_BIN}" -C "${TMP_DIR}"
+  else
+    printf '%s\n' "Need tar to extract the release bundle." 1>&2
+    exit 5
+  fi
+
+  if [ ! -f "${TMP_DIR%/}/ccm/ccm" ]; then
+    printf '%s\n' "Invalid bundle: missing ccm/ccm in ${ASSET}" 1>&2
+    exit 6
+  fi
+  chmod 755 "${TMP_DIR%/}/ccm/ccm" 2>/dev/null || true
+
+  # Replace version dir (best-effort).
+  rm -rf "${FINAL_DIR}" 2>/dev/null || true
+  if [ -e "${FINAL_DIR}" ]; then
+    # If we couldn't remove it, avoid nesting inside it.
+    FINAL_DIR="${FINAL_DIR}.$(date +%s)"
+  fi
+  mv "${TMP_DIR}" "${FINAL_DIR}"
+  TMP_DIR=""
+
+  # Update "current" symlink atomically (best-effort).
+  TMP_CUR="${ROOT_DIR%/}/.ccm.current.$$"
+  rm -f "${TMP_CUR}" 2>/dev/null || true
+  ln -s "${FINAL_DIR}" "${TMP_CUR}"
+  # If current exists as a directory (corrupted install), mv would move inside it.
+  if [ -d "${CURRENT_LINK}" ] && [ ! -L "${CURRENT_LINK}" ]; then
+    rm -rf "${CURRENT_LINK}" 2>/dev/null || true
+  fi
+  mv -f "${TMP_CUR}" "${CURRENT_LINK}"
+
+  # Link executable into bin dir.
+  TARGET="${CURRENT_LINK%/}/ccm/ccm"
+  DEST="${DEST_DIR%/}/ccm"
+  if [ -d "${DEST}" ] && [ ! -L "${DEST}" ]; then
+    printf '%s\n' "Install failed: ${DEST} is a directory; cannot create ccm symlink there." 1>&2
+    exit 9
+  fi
+  ln -sf "${TARGET}" "${DEST}" 2>/dev/null || true
+
+  # Provide the pip-style alias too (best-effort).
+  ALIAS="${DEST_DIR%/}/cursor-cli-manager"
+  (
+    cd "${DEST_DIR%/}" || exit 0
+    ln -sf "ccm" "$(basename "${ALIAS}")" 2>/dev/null || true
+  )
+
+  if is_runnable_ccm; then
+    printf '%s\n' "Installed ${ASSET} -> ${DEST}"
+    printf '%s\n' "Alias: ${ALIAS} -> ${DEST}"
+    printf '%s\n' "Bundle: ${CURRENT_LINK} -> ${FINAL_DIR}"
+    printf '%s\n' "Tip: ensure ${DEST_DIR} is on your PATH."
+    return 0
+  fi
+  return 1
+}
+
 fetch_to() {
   src="$1"
   out="$2"
@@ -192,65 +278,20 @@ if [ -s "${TMP_SUM}" ]; then
   fi
 fi
 
-TAG_RESOLVED="$(resolve_tag)"
-VERSIONS_DIR="${ROOT_DIR%/}/versions"
-if [ "${TAG_RESOLVED}" = "latest" ] && [ -z "${CCM_INSTALL_FROM_DIR:-}" ]; then
-  # Avoid reusing a potentially broken "versions/latest" directory.
-  TAG_RESOLVED="latest-$(date +%s)"
-fi
-FINAL_DIR="${VERSIONS_DIR%/}/${TAG_RESOLVED}"
-CURRENT_LINK="${ROOT_DIR%/}/current"
-
-# Extract bundle into a temp dir under versions/ (so final rename stays on the same filesystem).
-TMP_DIR="$(mktemp -d "${VERSIONS_DIR%/}/.ccm.extract.XXXXXX")"
-if command -v tar >/dev/null 2>&1; then
-  tar -xzf "${TMP_BIN}" -C "${TMP_DIR}"
-else
-  printf '%s\n' "Need tar to extract the release bundle." 1>&2
-  exit 5
+if install_once; then
+  exit 0
 fi
 
-if [ ! -f "${TMP_DIR%/}/ccm/ccm" ]; then
-  printf '%s\n' "Invalid bundle: missing ccm/ccm in ${ASSET}" 1>&2
-  exit 6
-fi
-chmod 755 "${TMP_DIR%/}/ccm/ccm" 2>/dev/null || true
+# Auto-repair once on broken installs (common after a symlink-loop upgrade).
+printf '%s\n' "Detected a broken ccm install; attempting automatic cleanup and reinstall..." 1>&2
+rm -rf "${ROOT_DIR%/}/current" "${ROOT_DIR%/}/versions" 2>/dev/null || true
+mkdir -p "${ROOT_DIR%/}/versions"
 
-# Replace version dir (best-effort).
-rm -rf "${FINAL_DIR}" 2>/dev/null || true
-if [ -e "${FINAL_DIR}" ]; then
-  # If we couldn't remove it, avoid nesting inside it.
-  FINAL_DIR="${FINAL_DIR}.$(date +%s)"
-fi
-mv "${TMP_DIR}" "${FINAL_DIR}"
-TMP_DIR=""
-
-# Update "current" symlink atomically.
-TMP_CUR="${ROOT_DIR%/}/.ccm.current.$$"
-rm -f "${TMP_CUR}" 2>/dev/null || true
-ln -s "${FINAL_DIR}" "${TMP_CUR}"
-mv -f "${TMP_CUR}" "${CURRENT_LINK}"
-
-# Link executable into bin dir.
-TARGET="${CURRENT_LINK%/}/ccm/ccm"
-DEST="${DEST_DIR%/}/ccm"
-ln -sf "${TARGET}" "${DEST}" 2>/dev/null || true
-
-# Provide the pip-style alias too (best-effort).
-ALIAS="${DEST_DIR%/}/cursor-cli-manager"
-(
-  cd "${DEST_DIR%/}" || exit 0
-  ln -sf "ccm" "$(basename "${ALIAS}")" 2>/dev/null || true
-)
-
-if [ ! -f "${TARGET}" ] || [ ! -x "${TARGET}" ]; then
-  printf '%s\n' "Install failed: ${TARGET} is not a runnable executable." 1>&2
-  printf '%s\n' "Tip: remove ${ROOT_DIR%/} and re-run the installer." 1>&2
-  exit 7
+if install_once; then
+  exit 0
 fi
 
-printf '%s\n' "Installed ${ASSET} -> ${DEST}"
-printf '%s\n' "Alias: ${ALIAS} -> ${DEST}"
-printf '%s\n' "Bundle: ${CURRENT_LINK} -> ${FINAL_DIR}"
-printf '%s\n' "Tip: ensure ${DEST_DIR} is on your PATH."
+printf '%s\n' "Install failed: ${TARGET} is not a runnable executable." 1>&2
+printf '%s\n' "Tip: remove ${ROOT_DIR%/} and re-run the installer." 1>&2
+exit 7
 

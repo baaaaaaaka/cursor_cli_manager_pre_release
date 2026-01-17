@@ -123,6 +123,39 @@ class TestInstallScript(unittest.TestCase):
             self.assertFalse((dest_dir / "ccm").exists())
             self.assertFalse((dest_dir / "cursor-cli-manager").exists())
 
+    def test_install_script_repairs_broken_current_executable(self) -> None:
+        """
+        Regression test:
+        If an older install/upgrade left current/ccm/ccm as a symlink loop, the installer
+        should clean the broken state and reinstall successfully.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            from_dir = base / "assets"
+            dest_dir = base / "bin"
+            root_dir = base / "root"
+            from_dir.mkdir(parents=True, exist_ok=True)
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            # Create a corrupted "current" dir with a self-referential ccm/ccm symlink.
+            bad = root_dir / "current" / "ccm"
+            bad.mkdir(parents=True, exist_ok=True)
+            loop = bad / "ccm"
+            try:
+                loop.symlink_to(loop)
+            except Exception:
+                # If the FS refuses self-links, at least make it a symlink (still invalid).
+                loop.symlink_to(bad)
+
+            p = self._run_install(from_dir=from_dir, dest_dir=dest_dir, root_dir=root_dir, checksums_ok=True)
+            self.assertEqual(p.returncode, 0, msg=p.stderr)
+            # Installer should have replaced current with a symlink and installed a real executable.
+            self.assertTrue((root_dir / "current").is_symlink())
+            exe = (root_dir / "current" / "ccm" / "ccm").resolve()
+            self.assertTrue(exe.exists())
+            self.assertFalse(exe.is_symlink())
+            self.assertEqual(exe.read_bytes(), b"fake-binary\n")
+            self.assertEqual((dest_dir / "ccm").resolve(), exe)
+
 
 if __name__ == "__main__":
     unittest.main()
