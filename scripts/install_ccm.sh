@@ -40,6 +40,22 @@ esac
 mkdir -p "${DEST_DIR}"
 mkdir -p "${ROOT_DIR%/}/versions"
 
+# Cross-process install lock (shared with in-app upgrade).
+LOCK_DIR="${ROOT_DIR%/}/.ccm.lock"
+LOCK_ACQUIRED="0"
+if mkdir "${LOCK_DIR}" 2>/dev/null; then
+  LOCK_ACQUIRED="1"
+  # Best-effort owner info (helps debugging stale locks).
+  {
+    printf 'pid=%s\n' "$$"
+    printf 'host=%s\n' "$(hostname 2>/dev/null || echo unknown)"
+  } > "${LOCK_DIR%/}/owner.txt" 2>/dev/null || true
+else
+  printf '%s\n' "Another ccm install/upgrade is in progress (lock: ${LOCK_DIR})." 1>&2
+  printf '%s\n' "If this is stale, remove it and retry: rm -rf ${LOCK_DIR}" 1>&2
+  exit 8
+fi
+
 # Create temp files inside DEST_DIR so final mv is atomic.
 TMP_BIN="$(mktemp "${DEST_DIR%/}/.ccm.asset.XXXXXX")"
 TMP_SUM="$(mktemp "${DEST_DIR%/}/.ccm.sums.XXXXXX")"
@@ -48,6 +64,9 @@ cleanup() {
   rm -f "${TMP_BIN}" "${TMP_SUM}" 2>/dev/null || true
   if [ -n "${TMP_DIR}" ] && [ -d "${TMP_DIR}" ]; then
     rm -rf "${TMP_DIR}" 2>/dev/null || true
+  fi
+  if [ "${LOCK_ACQUIRED}" = "1" ] && [ -d "${LOCK_DIR}" ]; then
+    rm -rf "${LOCK_DIR}" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT INT TERM

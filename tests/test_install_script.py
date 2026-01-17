@@ -106,6 +106,23 @@ class TestInstallScript(unittest.TestCase):
             self.assertFalse((dest_dir / "ccm").exists())
             self.assertFalse((dest_dir / "cursor-cli-manager").exists())
 
+    def test_install_script_fails_when_lock_is_held(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            from_dir = base / "assets"
+            dest_dir = base / "bin"
+            root_dir = base / "root"
+            from_dir.mkdir(parents=True, exist_ok=True)
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            # Pre-create the lock to simulate another install in progress.
+            (root_dir / ".ccm.lock").mkdir(parents=True, exist_ok=True)
+
+            p = self._run_install(from_dir=from_dir, dest_dir=dest_dir, root_dir=root_dir, checksums_ok=True)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("install/upgrade is in progress", p.stderr)
+            self.assertFalse((dest_dir / "ccm").exists())
+            self.assertFalse((dest_dir / "cursor-cli-manager").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

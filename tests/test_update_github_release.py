@@ -124,6 +124,57 @@ class TestUpdateGithubRelease(unittest.TestCase):
             self.assertTrue(ok)
             self.assertIn("updated to 0.5.8", out)
 
+    def test_perform_update_refuses_bin_dir_inside_bundle(self) -> None:
+        """
+        If bin_dir points inside <install_root>/current or <install_root>/versions,
+        the upgrade must refuse to avoid corrupting the bundle (symlink loops).
+        """
+        from cursor_cli_manager import update as upd
+
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root_dir = base / "root"
+            bad_bin_dir = root_dir / "current" / "ccm"
+
+            with patch.dict(
+                os.environ,
+                {"CCM_INSTALL_ROOT": str(root_dir), "CCM_INSTALL_DEST": str(bad_bin_dir)},
+                clear=False,
+            ), patch.object(sys, "frozen", True, create=True), patch(
+                "cursor_cli_manager.update.fetch_latest_release",
+                return_value=ReleaseInfo(tag="v9.9.9", version="9.9.9"),
+            ), patch(
+                "cursor_cli_manager.update.select_release_asset_name",
+                return_value="ccm-linux-x86_64-glibc217.tar.gz",
+            ):
+                ok, out = upd.perform_update(timeout_s=0.1, fetch=lambda *_a, **_k: b"")
+            self.assertFalse(ok)
+            self.assertIn("refusing to install", out)
+
+    def test_perform_update_fails_when_lock_is_held(self) -> None:
+        from cursor_cli_manager import update as upd
+
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root_dir = base / "root"
+            bin_dir = base / "bin"
+            (root_dir / ".ccm.lock").mkdir(parents=True, exist_ok=True)
+
+            with patch.dict(
+                os.environ,
+                {"CCM_INSTALL_ROOT": str(root_dir), "CCM_INSTALL_DEST": str(bin_dir)},
+                clear=False,
+            ), patch.object(sys, "frozen", True, create=True), patch(
+                "cursor_cli_manager.update.fetch_latest_release",
+                return_value=ReleaseInfo(tag="v9.9.9", version="9.9.9"),
+            ), patch(
+                "cursor_cli_manager.update.select_release_asset_name",
+                return_value="ccm-linux-x86_64-glibc217.tar.gz",
+            ):
+                ok, out = upd.perform_update(timeout_s=0.1, fetch=lambda *_a, **_k: b"")
+            self.assertFalse(ok)
+            self.assertIn("already in progress", out)
+
 
 if __name__ == "__main__":
     unittest.main()

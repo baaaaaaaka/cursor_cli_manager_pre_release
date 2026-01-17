@@ -11,12 +11,14 @@ import tarfile
 import tempfile
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple
 
 import shutil
 import ssl
+import time
 
 
 ENV_CCM_GITHUB_REPO = "CCM_GITHUB_REPO"  # e.g. "baaaaaaaka/cursor_cli_manager"
@@ -130,6 +132,46 @@ def get_install_root_dir() -> Path:
     if isinstance(v, str) and v.strip():
         return Path(v).expanduser()
     return default_install_root_dir()
+
+
+@contextmanager
+def _install_lock(*, install_root: Path, wait_s: float = 0.0) -> "object":
+    """
+    Cross-process lock for install/upgrade operations.
+
+    We use an atomic mkdir-based lock (more reliable than flock on some network filesystems).
+    The installer script uses the same lock directory name so both code paths coordinate.
+    """
+    root = install_root.expanduser()
+    root.mkdir(parents=True, exist_ok=True)
+    lock_dir = root / ".ccm.lock"
+    deadline = time.monotonic() + max(0.0, float(wait_s or 0.0))
+
+    while True:
+        try:
+            lock_dir.mkdir(mode=0o700)
+            try:
+                (lock_dir / "owner.txt").write_text(
+                    f"pid={os.getpid()}\nexe={sys.executable}\n",
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
+            break
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"ccm install/upgrade already in progress (lock: {lock_dir})")
+            time.sleep(0.1)
+        except Exception as e:
+            raise RuntimeError(f"failed to acquire install lock at {lock_dir}: {e}")
+
+    try:
+        yield object()
+    finally:
+        try:
+            shutil.rmtree(lock_dir)
+        except Exception:
+            pass
 
 
 def split_repo(repo: str) -> Tuple[str, str]:
@@ -343,10 +385,34 @@ def _atomic_replace(src: Path, dest: Path) -> None:
     os.replace(str(src), str(dest))
 
 
+def _resolve_for_compare(p: Path) -> Path:
+    try:
+        return p.resolve(strict=False)
+    except Exception:
+        try:
+            return p.absolute()
+        except Exception:
+            return p
+
+
+def _is_within(child: Path, parent: Path) -> bool:
+    """
+    Return True if `child` is equal to or under `parent`, comparing best-effort resolved paths.
+    """
+    c = _resolve_for_compare(child)
+    p = _resolve_for_compare(parent)
+    cp = c.parts
+    pp = p.parts
+    return len(cp) >= len(pp) and cp[: len(pp)] == pp
+
+
 def _atomic_symlink(target: Path, link: Path) -> None:
     """
     Atomically replace link with a symlink to target (best-effort).
     """
+    # Prevent creating self-referential symlinks (can lead to ELOOP).
+    if _resolve_for_compare(target) == _resolve_for_compare(link):
+        raise RuntimeError(f"refusing to create self-referential symlink: {link} -> {target}")
     link.parent.mkdir(parents=True, exist_ok=True)
     tmp = link.with_name(f".{link.name}.{os.getpid()}.tmp")
     try:
@@ -493,58 +559,69 @@ def download_and_install_release_bundle(
 
     install_root = install_root.expanduser()
     bin_dir = bin_dir.expanduser()
-    versions_dir = install_root / "versions"
-    versions_dir.mkdir(parents=True, exist_ok=True)
 
-    tmp_dir = Path(tempfile.mkdtemp(prefix=".ccm-extract-", dir=str(versions_dir)))
-    try:
-        _safe_extract_tar_gz(data, dest_dir=tmp_dir)
-        exe = tmp_dir / "ccm" / "ccm"
-        if not exe.exists():
-            raise RuntimeError(f"invalid bundle: missing {exe}")
+    with _install_lock(install_root=install_root, wait_s=0.0):
+        # Safety: never write the "ccm" entrypoint symlink into our own bundle directories.
+        # This prevents corruption like current/ccm/ccm becoming a self-referential symlink.
+        root_cmp = _resolve_for_compare(install_root)
+        if _is_within(bin_dir, root_cmp / "current") or _is_within(bin_dir, root_cmp / "versions"):
+            raise RuntimeError(
+                f"refusing to install into {bin_dir}: it is inside the ccm bundle root {install_root}. "
+                "Set CCM_INSTALL_DEST to a directory outside the bundle (e.g. ~/.local/bin)."
+            )
+
+        versions_dir = install_root / "versions"
+        versions_dir.mkdir(parents=True, exist_ok=True)
+
+        tmp_dir = Path(tempfile.mkdtemp(prefix=".ccm-extract-", dir=str(versions_dir)))
         try:
-            st = exe.stat()
-            os.chmod(str(exe), st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        except Exception:
-            pass
-
-        version_dir = versions_dir / tag
-        # Replace existing version directory (best-effort).
-        if version_dir.exists():
+            _safe_extract_tar_gz(data, dest_dir=tmp_dir)
+            exe = tmp_dir / "ccm" / "ccm"
+            if not exe.exists():
+                raise RuntimeError(f"invalid bundle: missing {exe}")
             try:
-                shutil.rmtree(version_dir)
-            except Exception:
-                pass
-        os.replace(str(tmp_dir), str(version_dir))
-
-        current = install_root / "current"
-        _atomic_symlink(version_dir, current)
-
-        target_exe = current / "ccm" / "ccm"
-        bin_dir.mkdir(parents=True, exist_ok=True)
-        _atomic_symlink(target_exe, bin_dir / "ccm")
-
-        # pip-style alias
-        alias = bin_dir / "cursor-cli-manager"
-        try:
-            if alias.exists() or alias.is_symlink():
-                alias.unlink()
-        except Exception:
-            pass
-        try:
-            os.symlink("ccm", str(alias))
-        except Exception:
-            # Fallback: point alias directly at target (may break if moved).
-            try:
-                _atomic_symlink(target_exe, alias)
+                st = exe.stat()
+                os.chmod(str(exe), st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
             except Exception:
                 pass
 
-        return target_exe
-    finally:
-        if tmp_dir.exists():
+            version_dir = versions_dir / tag
+            # Replace existing version directory (best-effort).
+            if version_dir.exists():
+                try:
+                    shutil.rmtree(version_dir)
+                except Exception:
+                    pass
+            os.replace(str(tmp_dir), str(version_dir))
+
+            current = install_root / "current"
+            _atomic_symlink(version_dir, current)
+
+            target_exe = current / "ccm" / "ccm"
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            _atomic_symlink(target_exe, bin_dir / "ccm")
+
+            # pip-style alias
+            alias = bin_dir / "cursor-cli-manager"
             try:
-                shutil.rmtree(tmp_dir)
+                if alias.exists() or alias.is_symlink():
+                    alias.unlink()
             except Exception:
                 pass
+            try:
+                os.symlink("ccm", str(alias))
+            except Exception:
+                # Fallback: point alias directly at target (may break if moved).
+                try:
+                    _atomic_symlink(target_exe, alias)
+                except Exception:
+                    pass
+
+            return target_exe
+        finally:
+            if tmp_dir.exists():
+                try:
+                    shutil.rmtree(tmp_dir)
+                except Exception:
+                    pass
 
