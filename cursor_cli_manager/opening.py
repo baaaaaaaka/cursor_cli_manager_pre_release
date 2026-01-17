@@ -13,12 +13,16 @@ from cursor_cli_manager.update import _default_runner
 ENV_CURSOR_AGENT_PATH = "CURSOR_AGENT_PATH"
 
 # Default cursor-agent flags we want enabled for interactive runs.
-DEFAULT_CURSOR_AGENT_FLAGS = ["--approve-mcps", "--browser"]
+DEFAULT_CURSOR_AGENT_FLAGS = ["--approve-mcps", "--browser", "--force"]
 
 
 _PROBE_LOCK = threading.Lock()
 _PROBE_STARTED = False
 _PROBED_CURSOR_AGENT_FLAGS: Optional[List[str]] = None
+
+_FORCE_LOCK = threading.Lock()
+_FORCE_SUPPORTED: Optional[bool] = None
+_FORCE_SUPPORTED_AGENT: Optional[str] = None
 
 
 def _help_supports_flag(help_text: str, flag: str) -> bool:
@@ -69,6 +73,48 @@ def get_cursor_agent_flags() -> List[str]:
     """
     probed = _PROBED_CURSOR_AGENT_FLAGS
     return list(probed) if probed is not None else list(DEFAULT_CURSOR_AGENT_FLAGS)
+
+
+def _supports_force_flag(agent: str, *, timeout_s: float = 1.0) -> bool:
+    """
+    Best-effort check whether the installed cursor-agent supports `--force`.
+
+    We validate by invoking `agent --force --help`:
+    - If it exits 0, the flag is accepted.
+    - If it fails, we will avoid passing `--force` when launching a chat.
+    """
+    global _FORCE_SUPPORTED, _FORCE_SUPPORTED_AGENT
+    cached = _FORCE_SUPPORTED
+    if cached is not None and _FORCE_SUPPORTED_AGENT == agent:
+        return cached
+    with _FORCE_LOCK:
+        cached = _FORCE_SUPPORTED
+        if cached is not None and _FORCE_SUPPORTED_AGENT == agent:
+            return cached
+        ok = False
+        try:
+            rc, _out, _err = _default_runner([agent, "--force", "--help"], timeout_s)
+            ok = rc == 0
+        except Exception:
+            ok = False
+        _FORCE_SUPPORTED = ok
+        _FORCE_SUPPORTED_AGENT = agent
+        return ok
+
+
+def _without_force_flag(cmd: List[str]) -> List[str]:
+    return [c for c in cmd if c not in ("--force", "-f")]
+
+
+def _prepare_exec_command(cmd: List[str]) -> List[str]:
+    """
+    Apply last-mile compatibility tweaks before exec'ing cursor-agent.
+    """
+    if "--force" in cmd or "-f" in cmd:
+        agent = cmd[0] if cmd else ""
+        if agent and not _supports_force_flag(agent):
+            return _without_force_flag(cmd)
+    return cmd
 
 
 def resolve_cursor_agent_path(explicit: Optional[str] = None) -> Optional[str]:
@@ -158,6 +204,7 @@ def exec_resume_chat(
     if workspace_path is not None:
         os.chdir(workspace_path)
     cmd = build_resume_command(chat_id, workspace_path=workspace_path, cursor_agent_path=cursor_agent_path)
+    cmd = _prepare_exec_command(cmd)
     os.execvp(cmd[0], cmd)
 
 
@@ -175,5 +222,6 @@ def exec_new_chat(
     if workspace_path is not None:
         os.chdir(workspace_path)
     cmd = build_new_command(workspace_path=workspace_path, cursor_agent_path=cursor_agent_path)
+    cmd = _prepare_exec_command(cmd)
     os.execvp(cmd[0], cmd)
 

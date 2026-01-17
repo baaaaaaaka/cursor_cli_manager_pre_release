@@ -23,7 +23,7 @@ def _is_truthy(v: Optional[str]) -> bool:
 
 def should_patch_models(*, explicit: Optional[bool] = None) -> bool:
     """
-    Decide whether to patch cursor-agent model enumeration.
+    Decide whether to patch cursor-agent bundles (model enumeration + autoRunControls).
 
     Priority:
     - explicit arg (if not None)
@@ -144,6 +144,20 @@ _RE_FETCH_USABLE_BLOCK = re.compile(
     r"function\s+fetchUsableModels\(aiServerClient\)\s*\{[\s\S]*?\}\s*(?=(?:\s|/\*[\s\S]*?\*/)*function\s+fetchDefaultModel)",
     flags=re.MULTILINE,
 )
+
+_RE_AUTORUN_CONTROLS_ANY = re.compile(r"\bconst\s+autoRunControls\b")
+_RE_AUTORUN_CONTROLS_ASSIGN = re.compile(
+    r"const\s+autoRunControls\b\s*=(?!\s*null\b)\s*[^;\n\r]*(?=;|\r?\n|$)"
+)
+
+
+def _patch_auto_run_controls(txt: str) -> Tuple[str, int]:
+    """
+    Replace any single-line `const autoRunControls = ...` assignment with `const autoRunControls = null`.
+
+    This is best-effort and intentionally avoids touching lines already set to `null`.
+    """
+    return _RE_AUTORUN_CONTROLS_ASSIGN.subn("const autoRunControls = null", txt)
 
 def _extract_call_arg(block: str) -> Optional[str]:
     """
@@ -281,10 +295,12 @@ def patch_cursor_agent_models(
     dry_run: bool = False,
 ) -> PatchReport:
     """
-    Patch cursor-agent bundles so model enumeration prefers "AvailableModels".
+    Patch cursor-agent bundles:
+    - prefer "AvailableModels" for model enumeration, and
+    - disable team auto-run restrictions by forcing `autoRunControls` to null.
 
     This is a best-effort patch:
-    - It only touches files that contain `fetchUsableModels(aiServerClient)`.
+    - It only touches files that contain either `fetchUsableModels(aiServerClient)` or `const autoRunControls = ...`.
     - It is idempotent (skips files already patched).
     """
     rep = PatchReport(versions_dir=versions_dir)
@@ -308,25 +324,41 @@ def patch_cursor_agent_models(
                 rep.errors.append((p, f"read failed: {e}"))
                 continue
 
-            # Skip only if we detect the current patch signature; otherwise allow upgrades.
-            if _PATCH_MARKER in txt and _PATCH_SIGNATURE in txt:
-                rep.skipped_already_patched += 1
-                continue
+            new_txt = txt
+            changed = False
 
-            m = _RE_FETCH_USABLE_BLOCK.search(txt)
-            if not m:
-                rep.skipped_not_applicable += 1
-                continue
+            # Patch #1: model enumeration (AvailableModels).
+            model_file_already_patched = _PATCH_MARKER in new_txt and _PATCH_SIGNATURE in new_txt
+            model_match = None if model_file_already_patched else _RE_FETCH_USABLE_BLOCK.search(new_txt)
+            model_found = model_file_already_patched or (model_match is not None)
+            model_unpatchable = False
+            model_already_patched = model_file_already_patched
+            if model_match is not None:
+                old_block = model_match.group(0)
+                new_block = _patch_fetch_usable_models_block(old_block)
+                if new_block:
+                    candidate = new_txt[: model_match.start()] + new_block + new_txt[model_match.end() :]
+                    if candidate != new_txt:
+                        new_txt = candidate
+                        changed = True
+                else:
+                    model_unpatchable = True
 
-            old_block = m.group(0)
-            new_block = _patch_fetch_usable_models_block(old_block)
-            if not new_block:
-                rep.skipped_not_applicable += 1
-                continue
+            # Patch #2: autoRunControls -> null.
+            auto_found = _RE_AUTORUN_CONTROLS_ANY.search(new_txt) is not None
+            if auto_found:
+                new_txt2, n_auto = _patch_auto_run_controls(new_txt)
+                if n_auto and new_txt2 != new_txt:
+                    new_txt = new_txt2
+                    changed = True
 
-            new_txt = txt[: m.start()] + new_block + txt[m.end() :]
-            if new_txt == txt:
-                rep.skipped_not_applicable += 1
+            if not changed:
+                if auto_found or model_already_patched:
+                    rep.skipped_already_patched += 1
+                elif model_found and model_unpatchable:
+                    rep.skipped_not_applicable += 1
+                else:
+                    rep.skipped_not_applicable += 1
                 continue
 
             if dry_run:

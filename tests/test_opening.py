@@ -81,6 +81,7 @@ class TestOpening(unittest.TestCase):
                 cmd = build_resume_command("abc123", workspace_path=Path("/tmp/ws"), cursor_agent_path=str(agent))
                 self.assertIn("--browser", cmd)
                 self.assertNotIn("--approve-mcps", cmd)
+                self.assertNotIn("--force", cmd)
         finally:
             opening._PROBE_STARTED = old_started
             opening._PROBED_CURSOR_AGENT_FLAGS = old_probed
@@ -117,6 +118,25 @@ class TestOpening(unittest.TestCase):
                     opening._PROBE_STARTED = old_started
                     opening._PROBED_CURSOR_AGENT_FLAGS = old_probed
             evt.set()
+
+    def test_prepare_exec_command_drops_force_when_unsupported(self) -> None:
+        import cursor_cli_manager.opening as opening
+
+        old_supported = getattr(opening, "_FORCE_SUPPORTED", None)
+        old_supported_agent = getattr(opening, "_FORCE_SUPPORTED_AGENT", None)
+        try:
+            opening._FORCE_SUPPORTED = None
+            opening._FORCE_SUPPORTED_AGENT = None
+
+            with patch("cursor_cli_manager.opening._default_runner", return_value=(2, "", "unknown option: --force")):
+                cmd = ["/tmp/cursor-agent", "--workspace", "/tmp/ws", "--force", "--resume", "abc123"]
+                prepared = opening._prepare_exec_command(cmd)
+                self.assertNotIn("--force", prepared)
+                self.assertIn("--resume", prepared)
+                self.assertIn("abc123", prepared)
+        finally:
+            opening._FORCE_SUPPORTED = old_supported
+            opening._FORCE_SUPPORTED_AGENT = old_supported_agent
 
 
 if __name__ == "__main__":

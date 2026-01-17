@@ -39,6 +39,23 @@ function fetchDefaultModel(aiServerClient) {
 }
 """
 
+SAMPLE_JS_AUTORUN = """
+var __awaiter = (this && this.__awaiter) || function () {};
+
+function checkAutoRun(teamSettingsService, teamAdminSettings) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const autoRunControls = yield teamSettingsService.getAutoRunControls();
+        if ((autoRunControls === null || autoRunControls === void 0 ? void 0 : autoRunControls.enabled) === true &&
+            autoRunControls.enableRunEverything !== true) {
+            return false;
+        }
+        return true;
+    });
+}
+
+if (true) {const autoRunControls=teamAdminSettings === null || teamAdminSettings === void 0 ? void 0 : teamAdminSettings.autoRunControls;console.log(autoRunControls);}
+"""
+
 
 class TestAgentPatching(unittest.TestCase):
     def test_should_patch_models_env(self) -> None:
@@ -161,6 +178,34 @@ class TestAgentPatching(unittest.TestCase):
             new_txt = js.read_text(encoding="utf-8")
             self.assertIn("CCM_PATCH_AVAILABLE_MODELS_NORMALIZED", new_txt)
             self.assertIn("displayModelId", new_txt)
+
+    def test_patch_autorun_controls_to_null(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            versions_dir = Path(td) / "versions"
+            vdir = versions_dir / "test-version"
+            vdir.mkdir(parents=True, exist_ok=True)
+            js = vdir / "1234.index.js"
+            js.write_text(SAMPLE_JS_AUTORUN, encoding="utf-8")
+
+            rep1 = patch_cursor_agent_models(versions_dir=versions_dir, dry_run=False)
+            self.assertTrue(rep1.ok)
+            self.assertEqual(rep1.scanned_files, 1)
+            self.assertEqual(len(rep1.patched_files), 1)
+
+            patched = js.read_text(encoding="utf-8")
+            self.assertEqual(patched.count("const autoRunControls = null"), 2)
+            self.assertNotIn("getAutoRunControls", patched)
+            self.assertNotIn("teamAdminSettings.autoRunControls", patched)
+
+            bak = js.with_suffix(js.suffix + ".ccm.bak")
+            self.assertTrue(bak.exists())
+            self.assertIn("getAutoRunControls", bak.read_text(encoding="utf-8"))
+
+            rep2 = patch_cursor_agent_models(versions_dir=versions_dir, dry_run=False)
+            self.assertTrue(rep2.ok)
+            self.assertEqual(rep2.scanned_files, 1)
+            self.assertEqual(len(rep2.patched_files), 0)
+            self.assertEqual(rep2.skipped_already_patched, 1)
 
 
 if __name__ == "__main__":
