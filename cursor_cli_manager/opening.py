@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import threading
+import sys
 from pathlib import Path
 from typing import List, Optional
 
@@ -205,6 +206,11 @@ def exec_resume_chat(
         os.chdir(workspace_path)
     cmd = build_resume_command(chat_id, workspace_path=workspace_path, cursor_agent_path=cursor_agent_path)
     cmd = _prepare_exec_command(cmd)
+    try:
+        ws = f" in {workspace_path}" if workspace_path is not None else ""
+        print(f"Launching cursor-agent{ws}… (resume {chat_id})", file=sys.stderr, flush=True)
+    except Exception:
+        pass
     os.execvp(cmd[0], cmd)
 
 
@@ -223,5 +229,10 @@ def exec_new_chat(
         os.chdir(workspace_path)
     cmd = build_new_command(workspace_path=workspace_path, cursor_agent_path=cursor_agent_path)
     cmd = _prepare_exec_command(cmd)
+    try:
+        ws = f" in {workspace_path}" if workspace_path is not None else ""
+        print(f"Launching cursor-agent{ws}…", file=sys.stderr, flush=True)
+    except Exception:
+        pass
     os.execvp(cmd[0], cmd)
 

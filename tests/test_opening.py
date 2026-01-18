@@ -3,6 +3,8 @@ import tempfile
 import threading
 import time
 import unittest
+import io
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,6 +13,8 @@ from cursor_cli_manager.opening import (
     DEFAULT_CURSOR_AGENT_FLAGS,
     build_new_command,
     build_resume_command,
+    exec_new_chat,
+    exec_resume_chat,
     get_cursor_agent_flags,
     resolve_cursor_agent_path,
     start_cursor_agent_flag_probe,
@@ -137,6 +141,50 @@ class TestOpening(unittest.TestCase):
         finally:
             opening._FORCE_SUPPORTED = old_supported
             opening._FORCE_SUPPORTED_AGENT = old_supported_agent
+
+    def test_exec_new_chat_prints_launching_message_before_exec(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            ws = td_path / "ws"
+            ws.mkdir(parents=True, exist_ok=True)
+            agent = td_path / "cursor-agent"
+            agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+            err_buf = io.StringIO()
+
+            def fake_execvp(_file, _args):  # noqa: ANN001
+                raise RuntimeError("exec called")
+
+            with patch("cursor_cli_manager.opening._supports_force_flag", return_value=True), patch(
+                "cursor_cli_manager.opening.os.execvp", side_effect=fake_execvp
+            ), redirect_stderr(err_buf):
+                with self.assertRaises(RuntimeError):
+                    exec_new_chat(workspace_path=ws, cursor_agent_path=str(agent))
+
+            self.assertIn("Launching cursor-agent", err_buf.getvalue())
+
+    def test_exec_resume_chat_prints_launching_message_before_exec(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            ws = td_path / "ws"
+            ws.mkdir(parents=True, exist_ok=True)
+            agent = td_path / "cursor-agent"
+            agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+            err_buf = io.StringIO()
+
+            def fake_execvp(_file, _args):  # noqa: ANN001
+                raise RuntimeError("exec called")
+
+            with patch("cursor_cli_manager.opening._supports_force_flag", return_value=True), patch(
+                "cursor_cli_manager.opening.os.execvp", side_effect=fake_execvp
+            ), redirect_stderr(err_buf):
+                with self.assertRaises(RuntimeError):
+                    exec_resume_chat("abc123", workspace_path=ws, cursor_agent_path=str(agent))
+
+            out = err_buf.getvalue()
+            self.assertIn("Launching cursor-agent", out)
+            self.assertIn("abc123", out)
 
 
 if __name__ == "__main__":
