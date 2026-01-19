@@ -164,9 +164,14 @@ install_once() {
   TMP_CUR="${ROOT_DIR%/}/.ccm.current.$$"
   rm -f "${TMP_CUR}" 2>/dev/null || true
   ln -s "${FINAL_DIR}" "${TMP_CUR}"
-  # If current exists as a directory (corrupted install), mv would move inside it.
-  if [ -d "${CURRENT_LINK}" ] && [ ! -L "${CURRENT_LINK}" ]; then
+  # If current is a symlink to a directory, mv would follow it and move inside.
+  # Remove existing current to ensure replacement.
+  if [ -L "${CURRENT_LINK}" ]; then
+    rm -f "${CURRENT_LINK}" 2>/dev/null || true
+  elif [ -d "${CURRENT_LINK}" ]; then
     rm -rf "${CURRENT_LINK}" 2>/dev/null || true
+  elif [ -e "${CURRENT_LINK}" ]; then
+    rm -f "${CURRENT_LINK}" 2>/dev/null || true
   fi
   mv -f "${TMP_CUR}" "${CURRENT_LINK}"
 

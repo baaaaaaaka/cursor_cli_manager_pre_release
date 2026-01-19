@@ -157,6 +157,31 @@ class TestInstallScript(unittest.TestCase):
             self.assertEqual(exe.read_bytes(), b"fake-binary\n")
             self.assertEqual((dest_dir / "ccm").resolve(), exe)
 
+    def test_install_script_replaces_current_symlink(self) -> None:
+        """
+        Regression test:
+        If current is a symlink to a directory, installer must replace it (not move inside).
+        """
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            from_dir = base / "assets"
+            dest_dir = base / "bin"
+            root_dir = base / "root"
+            from_dir.mkdir(parents=True, exist_ok=True)
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            old_dir = root_dir / "versions" / "old"
+            (old_dir / "ccm").mkdir(parents=True, exist_ok=True)
+            (old_dir / "ccm" / "ccm").write_bytes(b"old\n")
+            (root_dir / "current").symlink_to(old_dir)
+
+            p = self._run_install(from_dir=from_dir, dest_dir=dest_dir, root_dir=root_dir, checksums_ok=True)
+            self.assertEqual(p.returncode, 0, msg=p.stderr)
+            current = root_dir / "current"
+            self.assertTrue(current.is_symlink())
+            expected = (root_dir / "versions" / "latest").resolve()
+            self.assertEqual(current.resolve(), expected)
+            self.assertEqual((dest_dir / "ccm").resolve(), expected / "ccm" / "ccm")
+
 
 if __name__ == "__main__":
     unittest.main()
