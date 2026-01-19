@@ -57,6 +57,8 @@ RUN set -euxo pipefail; \
 
 # Prepare a minimal bundled terminfo database for common TERM values.
 RUN set -euxo pipefail; \
+    export LD_LIBRARY_PATH="/opt/ncurses6/lib"; \
+    export PATH="/opt/ncurses6/bin:${PATH}"; \
     mkdir -p /opt/terminfo /tmp/ccm-terminfo; \
     for t in xterm-256color xterm screen-256color screen vt100 linux; do \
       /opt/ncurses6/bin/infocmp -x "$t" > "/tmp/ccm-terminfo/$t"; \
