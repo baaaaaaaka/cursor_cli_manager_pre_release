@@ -198,6 +198,39 @@ def _sync_output_end() -> None:
         return
 
 
+def _write_stdout_bytes(payload: bytes) -> None:
+    try:
+        if not sys.stdout.isatty():
+            return
+        os.write(sys.stdout.fileno(), payload)
+    except Exception:
+        return
+
+
+def _is_xterm_like(term: str) -> bool:
+    t = (term or "").lower()
+    return any(k in t for k in ("xterm", "screen", "tmux", "rxvt", "alacritty", "wezterm", "kitty"))
+
+
+def force_exit_alternate_screen() -> None:
+    """
+    Best-effort escape from the alternate screen buffer.
+
+    This is a safety net for environments where curses doesn't emit rmcup on exit.
+    """
+    try:
+        seq = curses.tigetstr("rmcup")
+    except Exception:
+        seq = None
+    if isinstance(seq, (bytes, bytearray)) and seq:
+        _write_stdout_bytes(bytes(seq))
+        return
+    term = os.environ.get("TERM") or ""
+    if _is_xterm_like(term):
+        _write_stdout_bytes(b"\x1b[?1049l")
+    return
+
+
 def _init_theme() -> Theme:
     # Fallback theme (no color support).
     focused = curses.A_REVERSE | curses.A_BOLD
@@ -617,6 +650,152 @@ def _is_quit_key(ch: int) -> bool:
 
 def _should_quit(*, ch: int, input_mode: Optional[str]) -> bool:
     return (input_mode is None) and _is_quit_key(ch)
+
+
+_ESC_SEQUENCE_TIMEOUT_MS = 100
+# Based on prompt_toolkit's ANSI escape sequence mapping (input/ansi_escape_sequences.py).
+_ESC_SEQUENCE_MAP: Dict[str, int] = {
+    "[A": curses.KEY_UP,
+    "[B": curses.KEY_DOWN,
+    "[C": curses.KEY_RIGHT,
+    "[D": curses.KEY_LEFT,
+    "[H": curses.KEY_HOME,
+    "[F": curses.KEY_END,
+    "OA": curses.KEY_UP,
+    "OB": curses.KEY_DOWN,
+    "OC": curses.KEY_RIGHT,
+    "OD": curses.KEY_LEFT,
+    "OH": curses.KEY_HOME,
+    "OF": curses.KEY_END,
+}
+_CSI_TILDE_MAP: Dict[int, int] = {
+    1: curses.KEY_HOME,
+    4: curses.KEY_END,
+    5: curses.KEY_PPAGE,
+    6: curses.KEY_NPAGE,
+    7: curses.KEY_HOME,
+    8: curses.KEY_END,
+}
+
+
+def _parse_csi_tilde_number(seq: str) -> Optional[int]:
+    """
+    Parse CSI tilde sequences like "[5~" or "[6;2~" and return the leading number.
+    """
+    if not (seq.startswith("[") and seq.endswith("~")):
+        return None
+    body = seq[1:-1]
+    digits = ""
+    for ch in body:
+        if ch.isdigit():
+            digits += ch
+            continue
+        if ch == ";":
+            break
+        return None
+    if not digits:
+        return None
+    try:
+        return int(digits)
+    except Exception:
+        return None
+
+
+def _map_esc_sequence(seq: str) -> Optional[int]:
+    """
+    Map an ESC sequence suffix (after ESC) to a curses key code.
+    """
+    if seq in _ESC_SEQUENCE_MAP:
+        return _ESC_SEQUENCE_MAP[seq]
+    n = _parse_csi_tilde_number(seq)
+    if isinstance(n, int):
+        return _CSI_TILDE_MAP.get(n)
+    return None
+
+
+def _esc_sequence_complete(seq: str) -> bool:
+    if not seq:
+        return False
+    if seq in _ESC_SEQUENCE_MAP:
+        return True
+    if seq.startswith("["):
+        last = seq[-1]
+        if last == "~":
+            return True
+        if ("A" <= last <= "Z") or ("a" <= last <= "z"):
+            return True
+    if seq.startswith("O") and len(seq) >= 2:
+        last = seq[-1]
+        if ("A" <= last <= "Z") or ("a" <= last <= "z"):
+            return True
+    return False
+
+
+def _read_esc_sequence(win: "curses.window", *, timeout_ms: int, max_bytes: int = 16) -> str:
+    """
+    Read the remainder of an ESC sequence with a short timeout.
+    """
+    if timeout_ms <= 0:
+        return ""
+    deadline = time.monotonic() + (timeout_ms / 1000.0)
+    buf: List[str] = []
+    while len(buf) < max_bytes:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            win.timeout(int(remaining * 1000))
+        except Exception:
+            pass
+        try:
+            ch = win.getch()
+        except Exception:
+            break
+        if ch == -1:
+            break
+        if ch > 255 or ch < 0:
+            try:
+                curses.ungetch(ch)
+            except Exception:
+                pass
+            break
+        buf.append(chr(ch))
+        if _esc_sequence_complete("".join(buf)):
+            break
+    return "".join(buf)
+
+
+def _decode_esc_sequence(
+    win: "curses.window",
+    *,
+    timeout_ms: int,
+    restore_timeout_ms: Optional[int],
+) -> int:
+    """
+    Decode ESC-prefixed sequences (PageUp/PageDown, arrows, etc).
+    """
+    seq = ""
+    try:
+        seq = _read_esc_sequence(win, timeout_ms=timeout_ms)
+    finally:
+        if restore_timeout_ms is not None:
+            try:
+                win.timeout(int(restore_timeout_ms))
+            except Exception:
+                pass
+
+    if not seq:
+        return 27
+    mapped = _map_esc_sequence(seq)
+    if mapped is not None:
+        return mapped
+    # Push back bytes so they can be handled normally.
+    try:
+        for ch in reversed(seq):
+            curses.ungetch(ord(ch))
+    except Exception:
+        pass
+    return 27
 
 
 def disable_xon_xoff_flow_control() -> Optional[Tuple[int, object]]:
@@ -2002,13 +2181,25 @@ def select_chat(
         # Poll while background work is in progress, otherwise block on input.
         try:
             ui_pending = bool(toast is not None or export_pending is not None or not update_q.empty())
-            stdscr.timeout(_input_timeout_ms(bg_pending=bg.has_pending(), update_checking=update_checking, ui_pending=ui_pending))
+            timeout_ms = _input_timeout_ms(
+                bg_pending=bg.has_pending(),
+                update_checking=update_checking,
+                ui_pending=ui_pending,
+            )
+            stdscr.timeout(timeout_ms)
         except Exception:
+            timeout_ms = None
             pass
 
         ch = stdscr.getch()
         if ch == -1:
             continue
+        if ch == 27:
+            ch = _decode_esc_sequence(
+                stdscr,
+                timeout_ms=_ESC_SEQUENCE_TIMEOUT_MS,
+                restore_timeout_ms=timeout_ms,
+            )
 
         if ch == curses.KEY_RESIZE:
             continue

@@ -46,11 +46,13 @@ from cursor_cli_manager.tui import (
     ExportPendingExit,
     UpdateRequested,
     disable_xon_xoff_flow_control,
+    force_exit_alternate_screen,
     probe_synchronized_output_support,
     restore_termios,
     select_chat,
 )
 from cursor_cli_manager.update import perform_update
+from cursor_cli_manager.update import preferred_linux_asset_switch
 
 
 def _workspace_to_json(ws: AgentWorkspace) -> Dict[str, Any]:
@@ -214,6 +216,37 @@ def _run_tui(
         return curses.wrapper(_inner)
     finally:
         restore_termios(flow_saved)
+        force_exit_alternate_screen()
+
+
+def _restart_self(argv: List[str]) -> int:
+    argv = argv[:] or ["ccm"]
+    restart_errors: List[BaseException] = []
+    try:
+        os.execvp(argv[0], argv)
+    except BaseException as e:
+        restart_errors.append(e)
+
+    # Fallback: run via python -m for editable/dev installs only.
+    if not getattr(sys, "frozen", False):
+        try:
+            os.execv(sys.executable, [sys.executable, "-m", "cursor_cli_manager"] + argv[1:])
+        except BaseException as e:
+            restart_errors.append(e)
+
+    # If we couldn't restart, don't crash. Tell the user to restart manually.
+    print("Upgrade installed, but failed to restart automatically.", file=sys.stderr)
+    if restart_errors:
+        last = restart_errors[-1]
+        try:
+            eno = getattr(last, "errno", None)
+        except Exception:
+            eno = None
+        if eno == 40 or "Too many levels of symbolic links" in str(last):
+            print("It looks like your `ccm` symlink is broken (symbolic link loop).", file=sys.stderr)
+            print("Fix: re-run the installer or remove the broken symlink and reinstall.", file=sys.stderr)
+    print("Please re-run `ccm` manually.", file=sys.stderr)
+    return 0
 
 
 def _prepare_curses_term_for_tui() -> None:
@@ -320,6 +353,15 @@ def cmd_tui(
     patch_models: bool = False,
     cursor_agent_versions_dir: Optional[str] = None,
 ) -> int:
+    preferred_asset = preferred_linux_asset_switch()
+    if preferred_asset:
+        ok, out = perform_update(python=sys.executable, asset_name=preferred_asset)
+        if out:
+            print(out)
+        if ok:
+            return _restart_self(sys.argv[:] or ["ccm"])
+        print(f"Auto-upgrade to {preferred_asset} failed; continuing.", file=sys.stderr)
+
     # Non-blocking: probe cursor-agent optional flags in background while the user browses the TUI.
     start_cursor_agent_flag_probe()
     if patch_models:
@@ -376,33 +418,7 @@ def cmd_tui(
                 print(out)
             if ok:
                 # Restart the current command so the updated code is loaded.
-                argv = sys.argv[:] or ["ccm"]
-                restart_errors: List[BaseException] = []
-                try:
-                    os.execvp(argv[0], argv)
-                except BaseException as e:
-                    restart_errors.append(e)
-
-                # Fallback: run via python -m for editable/dev installs only.
-                if not getattr(sys, "frozen", False):
-                    try:
-                        os.execv(sys.executable, [sys.executable, "-m", "cursor_cli_manager"] + argv[1:])
-                    except BaseException as e:
-                        restart_errors.append(e)
-
-                # If we couldn't restart, don't crash. Tell the user to restart manually.
-                print("Upgrade installed, but failed to restart automatically.", file=sys.stderr)
-                if restart_errors:
-                    last = restart_errors[-1]
-                    try:
-                        eno = getattr(last, "errno", None)
-                    except Exception:
-                        eno = None
-                    if eno == 40 or "Too many levels of symbolic links" in str(last):
-                        print("It looks like your `ccm` symlink is broken (symbolic link loop).", file=sys.stderr)
-                        print("Fix: re-run the installer or remove the broken symlink and reinstall.", file=sys.stderr)
-                print("Please re-run `ccm` manually.", file=sys.stderr)
-                return 0
+                return _restart_self(sys.argv[:] or ["ccm"])
             # Pull failed; return to TUI.
             continue
 

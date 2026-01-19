@@ -8,6 +8,8 @@ class TestReleaseAssetsConsistency(unittest.TestCase):
         txt = (root / "scripts" / "install_ccm.sh").read_text(encoding="utf-8")
         for name in (
             "ccm-linux-x86_64-glibc217.tar.gz",
+            "ccm-linux-x86_64-nc5.tar.gz",
+            "ccm-linux-x86_64-nc6.tar.gz",
             "ccm-macos-x86_64.tar.gz",
             "ccm-macos-arm64.tar.gz",
         ):
@@ -20,6 +22,8 @@ class TestReleaseAssetsConsistency(unittest.TestCase):
         txt = (root / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
         for name in (
             "ccm-linux-x86_64-glibc217.tar.gz",
+            "ccm-linux-x86_64-nc5.tar.gz",
+            "ccm-linux-x86_64-nc6.tar.gz",
             "ccm-macos-x86_64.tar.gz",
             "ccm-macos-arm64.tar.gz",
             "checksums.txt",
@@ -33,8 +37,10 @@ class TestReleaseAssetsConsistency(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         txt = (root / "scripts" / "build_linux_binary_docker.sh").read_text(encoding="utf-8")
         self.assertIn("ccm-linux-x86_64-glibc217.tar.gz", txt)
+        self.assertIn("ccm-linux-x86_64-nc5.tar.gz", txt)
+        self.assertIn("ccm-linux-x86_64-nc6.tar.gz", txt)
         self.assertIn("--add-data", txt)
-        self.assertIn("/opt/terminfo:terminfo", txt)
+        self.assertIn("CCM_LINUX_TERMINFO_DIR", txt)
         self.assertIn("--collect-data certifi", txt)
         self.assertIn("tar -C", txt)
 

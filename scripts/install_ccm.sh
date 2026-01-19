@@ -10,6 +10,7 @@ set -eu
 # - CCM_INSTALL_ROOT: extracted bundle root (default: ~/.local/lib/ccm)
 # - CCM_INSTALL_FROM_DIR: local dir containing assets + checksums.txt (for offline/test)
 # - CCM_INSTALL_OS / CCM_INSTALL_ARCH: override uname detection (for test)
+# - CCM_INSTALL_NCURSES_VARIANT: linux ncurses variant override (nc5/nc6/common)
 
 REPO="${CCM_GITHUB_REPO:-baaaaaaaka/cursor_cli_manager}"
 TAG="${CCM_INSTALL_TAG:-latest}"
@@ -27,8 +28,46 @@ case "$(printf '%s' "$ARCH" | tr '[:upper:]' '[:lower:]')" in
 esac
 
 ASSET=""
+detect_linux_variant() {
+  v="${CCM_INSTALL_NCURSES_VARIANT:-}"
+  case "${v}" in
+    nc5|nc6|common) printf '%s' "${v}"; return 0 ;;
+  esac
+  if command -v ldconfig >/dev/null 2>&1; then
+    if ldconfig -p 2>/dev/null | grep -q 'libtinfo\.so\.6'; then
+      printf '%s' "nc6"
+      return 0
+    fi
+    if ldconfig -p 2>/dev/null | grep -q 'libtinfo\.so\.5'; then
+      printf '%s' "nc5"
+      return 0
+    fi
+  fi
+  for d in /lib /lib64 /usr/lib /usr/lib64 /usr/local/lib /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu; do
+    if [ -e "${d}/libtinfo.so.6" ] || [ -e "${d}/libncursesw.so.6" ]; then
+      printf '%s' "nc6"
+      return 0
+    fi
+  done
+  for d in /lib /lib64 /usr/lib /usr/lib64 /usr/local/lib /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu; do
+    if [ -e "${d}/libtinfo.so.5" ] || [ -e "${d}/libncursesw.so.5" ]; then
+      printf '%s' "nc5"
+      return 0
+    fi
+  done
+  printf '%s' "common"
+  return 0
+}
+
 case "${OS}-${ARCH_NORM}" in
-  Linux-x86_64) ASSET="ccm-linux-x86_64-glibc217.tar.gz" ;;
+  Linux-x86_64)
+    VARIANT="$(detect_linux_variant)"
+    case "${VARIANT}" in
+      nc6) ASSET="ccm-linux-x86_64-nc6.tar.gz" ;;
+      nc5) ASSET="ccm-linux-x86_64-nc5.tar.gz" ;;
+      *) ASSET="ccm-linux-x86_64-glibc217.tar.gz" ;;
+    esac
+    ;;
   Darwin-x86_64) ASSET="ccm-macos-x86_64.tar.gz" ;;
   Darwin-arm64) ASSET="ccm-macos-arm64.tar.gz" ;;
   *)

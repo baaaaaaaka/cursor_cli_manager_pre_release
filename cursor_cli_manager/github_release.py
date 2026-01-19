@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import io
 import json
@@ -25,6 +26,11 @@ ENV_CCM_GITHUB_REPO = "CCM_GITHUB_REPO"  # e.g. "baaaaaaaka/cursor_cli_manager"
 DEFAULT_GITHUB_REPO = "baaaaaaaka/cursor_cli_manager"
 ENV_CCM_INSTALL_DEST = "CCM_INSTALL_DEST"
 ENV_CCM_INSTALL_ROOT = "CCM_INSTALL_ROOT"
+ENV_CCM_NCURSES_VARIANT = "CCM_NCURSES_VARIANT"
+
+LINUX_ASSET_COMMON = "ccm-linux-x86_64-glibc217.tar.gz"
+LINUX_ASSET_NC5 = "ccm-linux-x86_64-nc5.tar.gz"
+LINUX_ASSET_NC6 = "ccm-linux-x86_64-nc6.tar.gz"
 
 
 Fetch = Callable[[str, float, Dict[str, str]], bytes]
@@ -306,12 +312,91 @@ def _normalize_arch(machine: str) -> str:
     return m or "unknown"
 
 
-def select_release_asset_name(*, system: Optional[str] = None, machine: Optional[str] = None) -> str:
+def _normalize_ncurses_variant(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    v = value.strip().lower()
+    if v in ("nc5", "nc6", "common"):
+        return v
+    if v == "5":
+        return "nc5"
+    if v == "6":
+        return "nc6"
+    return None
+
+
+def _can_load_shared_lib(names: Tuple[str, ...]) -> bool:
+    for name in names:
+        try:
+            ctypes.CDLL(name)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def detect_linux_ncurses_variant(*, env: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """
+    Best-effort detection of the preferred ncurses ABI for Linux.
+
+    Returns "nc6", "nc5", or None if unknown.
+    """
+    if (platform.system() or "").lower() != "linux":
+        return None
+    environ = env or os.environ
+    override = _normalize_ncurses_variant(environ.get(ENV_CCM_NCURSES_VARIANT))
+    if override == "common":
+        return None
+    if override in ("nc5", "nc6"):
+        return override
+    if _can_load_shared_lib(("libtinfo.so.6", "libncursesw.so.6")):
+        return "nc6"
+    if _can_load_shared_lib(("libtinfo.so.5", "libncursesw.so.5")):
+        return "nc5"
+    return None
+
+
+def linux_asset_name_for_variant(variant: Optional[str]) -> str:
+    if variant == "nc6":
+        return LINUX_ASSET_NC6
+    if variant == "nc5":
+        return LINUX_ASSET_NC5
+    return LINUX_ASSET_COMMON
+
+
+def detect_frozen_binary_ncurses_variant() -> Optional[str]:
+    """
+    Inspect the bundled libs to infer the ncurses ABI of the running binary.
+    """
+    if not is_frozen_binary():
+        return None
+    if (platform.system() or "").lower() != "linux":
+        return None
+    try:
+        exe = Path(sys.executable).resolve()
+    except Exception:
+        return None
+    internal = exe.parent / "_internal"
+    if (internal / "libtinfo.so.6").exists() or (internal / "libncursesw.so.6").exists():
+        return "nc6"
+    if (internal / "libtinfo.so.5").exists() or (internal / "libncursesw.so.5").exists():
+        return "nc5"
+    return None
+
+
+def select_release_asset_name(
+    *,
+    system: Optional[str] = None,
+    machine: Optional[str] = None,
+    linux_variant: Optional[str] = None,
+) -> str:
     """
     Choose the Release asset name for the current platform.
 
     Naming convention (expected on GitHub Releases):
-    - ccm-linux-x86_64-glibc217.tar.gz
+    - ccm-linux-x86_64-glibc217.tar.gz (legacy/common)
+    - ccm-linux-x86_64-nc5.tar.gz
+    - ccm-linux-x86_64-nc6.tar.gz
     - ccm-macos-x86_64.tar.gz
     - ccm-macos-arm64.tar.gz
     """
@@ -326,7 +411,10 @@ def select_release_asset_name(*, system: Optional[str] = None, machine: Optional
             raise RuntimeError("Unsupported Linux libc: need glibc >= 2.17")
         if gv < (2, 17):
             raise RuntimeError(f"Unsupported glibc: {gv[0]}.{gv[1]} (need >= 2.17)")
-        return "ccm-linux-x86_64-glibc217.tar.gz"
+        variant = _normalize_ncurses_variant(linux_variant)
+        if not variant:
+            variant = detect_linux_ncurses_variant()
+        return linux_asset_name_for_variant(variant)
 
     if sysname == "darwin":
         if arch == "x86_64":

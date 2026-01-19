@@ -10,7 +10,7 @@ from unittest.mock import patch
 import sys
 
 from cursor_cli_manager.update import check_for_update, perform_update
-from cursor_cli_manager.github_release import ReleaseInfo
+from cursor_cli_manager.github_release import LINUX_ASSET_COMMON, ReleaseInfo
 
 
 class TestUpdateGithubRelease(unittest.TestCase):
@@ -21,7 +21,7 @@ class TestUpdateGithubRelease(unittest.TestCase):
             return b'{"tag_name":"v9.9.9"}'
 
         with patch.object(sys, "frozen", True, create=True), patch(
-            "cursor_cli_manager.update.select_release_asset_name", return_value="ccm-linux-x86_64-glibc217.tar.gz"
+            "cursor_cli_manager.update.select_release_asset_name", return_value=LINUX_ASSET_COMMON
         ):
             st = check_for_update(timeout_s=0.1, fetch=fake_fetch)
         self.assertEqual(st.method, "github_release")
@@ -30,7 +30,7 @@ class TestUpdateGithubRelease(unittest.TestCase):
         self.assertEqual(st.remote_version, "9.9.9")
 
     def test_perform_update_installs_bundle_when_frozen(self) -> None:
-        asset = "ccm-linux-x86_64-glibc217.tar.gz"
+        asset = LINUX_ASSET_COMMON
         new_bytes = b"new-binary\n"
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tf:
@@ -113,7 +113,7 @@ class TestUpdateGithubRelease(unittest.TestCase):
                 return_value=ReleaseInfo(tag="v0.5.8", version="0.5.8"),
             ), patch(
                 "cursor_cli_manager.update.select_release_asset_name",
-                return_value="ccm-linux-x86_64-glibc217.tar.gz",
+                return_value=LINUX_ASSET_COMMON,
             ), patch(
                 "cursor_cli_manager.update.shutil.which", return_value=str(exe_link)
             ), patch(
@@ -145,7 +145,7 @@ class TestUpdateGithubRelease(unittest.TestCase):
                 return_value=ReleaseInfo(tag="v9.9.9", version="9.9.9"),
             ), patch(
                 "cursor_cli_manager.update.select_release_asset_name",
-                return_value="ccm-linux-x86_64-glibc217.tar.gz",
+                return_value=LINUX_ASSET_COMMON,
             ):
                 ok, out = upd.perform_update(timeout_s=0.1, fetch=lambda *_a, **_k: b"")
             self.assertFalse(ok)
@@ -169,7 +169,7 @@ class TestUpdateGithubRelease(unittest.TestCase):
                 return_value=ReleaseInfo(tag="v9.9.9", version="9.9.9"),
             ), patch(
                 "cursor_cli_manager.update.select_release_asset_name",
-                return_value="ccm-linux-x86_64-glibc217.tar.gz",
+                return_value=LINUX_ASSET_COMMON,
             ):
                 ok, out = upd.perform_update(timeout_s=0.1, fetch=lambda *_a, **_k: b"")
             self.assertFalse(ok)

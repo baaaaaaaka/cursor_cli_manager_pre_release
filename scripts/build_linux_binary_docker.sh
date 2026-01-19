@@ -12,11 +12,23 @@ set -euo pipefail
 #   CCM_LINUX_BUILDER_IMAGE=ccm-linux-builder:local ./scripts/build_linux_binary_docker.sh
 #
 # Output:
-#   ./out/ccm-linux-x86_64-glibc217
+#   ./out/ccm-linux-x86_64-glibc217.tar.gz
+#   ./out/ccm-linux-x86_64-nc5.tar.gz
+#   ./out/ccm-linux-x86_64-nc6.tar.gz
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${ROOT}/out"
-ASSET_NAME="ccm-linux-x86_64-glibc217.tar.gz"
+VARIANT="${CCM_LINUX_VARIANT:-common}"
+ASSET_NAME="${CCM_LINUX_ASSET_NAME:-}"
+TERMINFO_DIR="${CCM_LINUX_TERMINFO_DIR:-/opt/terminfo}"
+
+if [ -z "${ASSET_NAME}" ]; then
+  case "${VARIANT}" in
+    nc5) ASSET_NAME="ccm-linux-x86_64-nc5.tar.gz" ;;
+    nc6) ASSET_NAME="ccm-linux-x86_64-nc6.tar.gz" ;;
+    *) ASSET_NAME="ccm-linux-x86_64-glibc217.tar.gz" ;;
+  esac
+fi
 
 IMAGE="${CCM_LINUX_BUILDER_IMAGE:-ghcr.io/baaaaaaaka/ccm-linux-builder:py311}"
 
@@ -37,7 +49,7 @@ docker run --rm \
   /bin/bash -lc "
     set -euxo pipefail
     cd /work
-    python3 -m PyInstaller --clean -n ccm --add-data \"/opt/terminfo:terminfo\" --collect-data certifi --specpath out/_spec --distpath out/_dist --workpath out/_build cursor_cli_manager/__main__.py
+    python3 -m PyInstaller --clean -n ccm --add-data \"${TERMINFO_DIR}:terminfo\" --collect-data certifi --specpath out/_spec --distpath out/_dist --workpath out/_build cursor_cli_manager/__main__.py
     # Package the onedir output as a tarball for release distribution.
     tar -C out/_dist -czf out/${ASSET_NAME} ccm
   "

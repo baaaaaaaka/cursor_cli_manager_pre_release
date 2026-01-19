@@ -34,6 +34,7 @@ class TestInstallScript(unittest.TestCase):
                 "CCM_INSTALL_ROOT": str(root_dir),
                 "CCM_INSTALL_OS": "Linux",
                 "CCM_INSTALL_ARCH": "x86_64",
+                "CCM_INSTALL_NCURSES_VARIANT": "common",
             }
         )
         p = subprocess.run(

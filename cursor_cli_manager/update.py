@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import signal
 import subprocess
 import sys
@@ -21,8 +22,12 @@ from cursor_cli_manager.github_release import (
     get_github_repo,
     get_install_bin_dir,
     get_install_root_dir,
+    detect_frozen_binary_ncurses_variant,
     is_frozen_binary,
     is_version_newer,
+    linux_asset_name_for_variant,
+    LINUX_ASSET_NC5,
+    LINUX_ASSET_NC6,
     select_release_asset_name,
 )
 
@@ -43,6 +48,7 @@ class UpdateStatus:
     repo: Optional[str] = None
     asset_name: Optional[str] = None
     update_available: bool = False
+    asset_mismatch: bool = False
     error: Optional[str] = None
 
 
@@ -246,15 +252,24 @@ def check_for_update(
             )
 
         newer = is_version_newer(rel.version, __version__)
+        current_variant = detect_frozen_binary_ncurses_variant()
+        current_asset = linux_asset_name_for_variant(current_variant) if current_variant else None
+        asset_mismatch = bool(
+            current_asset
+            and asset_name in (LINUX_ASSET_NC5, LINUX_ASSET_NC6)
+            and asset_name != current_asset
+        )
+        supported = (newer is not None) or asset_mismatch
         return UpdateStatus(
-            supported=(newer is not None),
+            supported=supported,
             method="github_release",
             repo=repo,
             installed_version=__version__,
             remote_version=rel.version,
             asset_name=asset_name,
-            update_available=bool(newer),
-            error=None if newer is not None else "failed to parse version",
+            update_available=bool(newer) or asset_mismatch,
+            asset_mismatch=asset_mismatch,
+            error=None if supported else "failed to parse version",
         )
 
     info = read_pep610_install_info(package_dir=package_dir)
@@ -303,6 +318,7 @@ def perform_update(
     timeout_s: float = 120.0,
     run: Runner = _default_runner,
     fetch: Optional[Fetch] = None,
+    asset_name: Optional[str] = None,
 ) -> Tuple[bool, str]:
     """
     Perform an in-place upgrade.
@@ -321,7 +337,8 @@ def perform_update(
                 rel = fetch_latest_release(repo, timeout_s=timeout_s)
             else:
                 rel = fetch_latest_release(repo, timeout_s=timeout_s, fetch=fetch)
-            asset_name = select_release_asset_name()
+            if not (isinstance(asset_name, str) and asset_name.strip()):
+                asset_name = select_release_asset_name()
 
             # Determine install dirs (env override > infer from PATH/executable > defaults).
             bin_dir = get_install_bin_dir()
@@ -389,4 +406,25 @@ def perform_update(
     code, out, err = run(cmd, timeout_s)
     txt = ((out or "") + ("\n" if out and err else "") + (err or "")).strip()
     return (code == 0), txt
+
+
+def preferred_linux_asset_switch() -> Optional[str]:
+    """
+    Return the preferred Linux asset name if we should switch variants.
+    """
+    if not is_frozen_binary():
+        return None
+    if (platform.system() or "").lower() != "linux":
+        return None
+    try:
+        preferred = select_release_asset_name()
+    except Exception:
+        return None
+    if preferred not in (LINUX_ASSET_NC5, LINUX_ASSET_NC6):
+        return None
+    current_variant = detect_frozen_binary_ncurses_variant()
+    current_asset = linux_asset_name_for_variant(current_variant) if current_variant else None
+    if current_asset and current_asset != preferred:
+        return preferred
+    return None
 

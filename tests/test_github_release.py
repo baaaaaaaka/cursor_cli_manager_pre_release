@@ -8,6 +8,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from cursor_cli_manager.github_release import (
+    LINUX_ASSET_COMMON,
+    LINUX_ASSET_NC5,
+    LINUX_ASSET_NC6,
     ReleaseInfo,
     download_and_install_release_bundle,
     fetch_latest_release,
@@ -40,19 +43,32 @@ class TestGithubReleaseHelpers(unittest.TestCase):
         """
         m = parse_checksums_txt(txt)
         self.assertEqual(
-            m["ccm-linux-x86_64-glibc217.tar.gz"],
+            m[LINUX_ASSET_COMMON],
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         )
 
     def test_select_release_asset_name_linux_glibc(self) -> None:
-        with patch("cursor_cli_manager.github_release._glibc_version", return_value=(2, 17)):
+        with patch("cursor_cli_manager.github_release._glibc_version", return_value=(2, 17)), patch(
+            "cursor_cli_manager.github_release.detect_linux_ncurses_variant", return_value="nc6"
+        ):
             self.assertEqual(
                 select_release_asset_name(system="Linux", machine="x86_64"),
-                "ccm-linux-x86_64-glibc217.tar.gz",
+                LINUX_ASSET_NC6,
             )
         with patch("cursor_cli_manager.github_release._glibc_version", return_value=(2, 16)):
             with self.assertRaises(RuntimeError):
                 select_release_asset_name(system="Linux", machine="x86_64")
+
+    def test_select_release_asset_name_linux_variant_override(self) -> None:
+        with patch("cursor_cli_manager.github_release._glibc_version", return_value=(2, 17)):
+            self.assertEqual(
+                select_release_asset_name(system="Linux", machine="x86_64", linux_variant="nc5"),
+                LINUX_ASSET_NC5,
+            )
+            self.assertEqual(
+                select_release_asset_name(system="Linux", machine="x86_64", linux_variant="common"),
+                LINUX_ASSET_COMMON,
+            )
 
     def test_select_release_asset_name_macos(self) -> None:
         self.assertEqual(select_release_asset_name(system="Darwin", machine="x86_64"), "ccm-macos-x86_64.tar.gz")
@@ -69,7 +85,7 @@ class TestGithubReleaseFetchAndInstall(unittest.TestCase):
         self.assertEqual(rel, ReleaseInfo(tag="v0.5.7", version="0.5.7"))
 
     def test_download_and_install_release_bundle_verifies_checksum(self) -> None:
-        asset = "ccm-linux-x86_64-glibc217.tar.gz"
+        asset = LINUX_ASSET_COMMON
         payload = b"hello\n"
         import io
 
@@ -115,7 +131,7 @@ class TestGithubReleaseFetchAndInstall(unittest.TestCase):
             self.assertEqual((bin_dir / "cursor-cli-manager").resolve(), exe)
 
     def test_download_and_install_release_bundle_fails_on_checksum_mismatch(self) -> None:
-        asset = "ccm-linux-x86_64-glibc217.tar.gz"
+        asset = LINUX_ASSET_COMMON
         payload = b"hello\n"
         import io
 
