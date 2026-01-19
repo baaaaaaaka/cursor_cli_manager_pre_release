@@ -29,6 +29,7 @@ class TestReleaseAssetsConsistency(unittest.TestCase):
             "checksums.txt",
         ):
             self.assertIn(name, txt)
+        self.assertIn("sha256sum ccm-*.tar.gz", txt)
         # CA bundle must be included in binary releases for SSL fallback.
         self.assertIn("certifi", txt)
         self.assertIn("--collect-data certifi", txt)

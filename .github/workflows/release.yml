@@ -151,7 +151,7 @@ jobs:
       - name: Prepare checksums.txt
         run: |
           set -euxo pipefail
-          sha256sum dist/ccm-*.tar.gz > dist/checksums.txt
+          (cd dist && sha256sum ccm-*.tar.gz > checksums.txt)
           ls -la dist
 
       - name: Publish GitHub Release
