@@ -138,6 +138,8 @@ jobs:
       - build-linux-x86_64-glibc217
       - build-linux-x86_64-nc5
       - build-linux-x86_64-nc6
+    env:
+      UPGRADE_FROM_TAG: v0.6.4
     strategy:
       fail-fast: false
       matrix:
@@ -170,7 +172,35 @@ jobs:
             shasum -a 256 "${{ matrix.asset }}" > checksums.txt
           fi
 
-      - name: Install linux bundle
+      - name: Download old linux asset
+        run: |
+          set -euxo pipefail
+          OLD_DIR="${RUNNER_TEMP}/ccm-old"
+          OLD_ASSET="ccm-linux-x86_64-glibc217.tar.gz"
+          OLD_URL="https://github.com/${{ github.repository }}/releases/download/${UPGRADE_FROM_TAG}/${OLD_ASSET}"
+          mkdir -p "${OLD_DIR}"
+          curl -fsSL "${OLD_URL}" -o "${OLD_DIR}/${OLD_ASSET}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd "${OLD_DIR}" && sha256sum "${OLD_ASSET}" > checksums.txt)
+          else
+            (cd "${OLD_DIR}" && shasum -a 256 "${OLD_ASSET}" > checksums.txt)
+          fi
+
+      - name: Install old linux bundle
+        run: |
+          set -euxo pipefail
+          export CCM_INSTALL_FROM_DIR="${RUNNER_TEMP}/ccm-old"
+          export CCM_INSTALL_DEST="${RUNNER_TEMP}/ccm-test/bin"
+          export CCM_INSTALL_ROOT="${RUNNER_TEMP}/ccm-test/root"
+          export CCM_INSTALL_TAG="${UPGRADE_FROM_TAG}"
+          export CCM_INSTALL_NCURSES_VARIANT="common"
+          export CCM_INSTALL_OS="Linux"
+          export CCM_INSTALL_ARCH="x86_64"
+          mkdir -p "${CCM_INSTALL_DEST}" "${CCM_INSTALL_ROOT}" "${RUNNER_TEMP}/ccm-test/config"
+          sh scripts/install_ccm.sh
+          echo "OLD_CURRENT=$(readlink "${CCM_INSTALL_ROOT}/current")" >> "${GITHUB_ENV}"
+
+      - name: Upgrade to new linux bundle
         run: |
           set -euxo pipefail
           export CCM_INSTALL_FROM_DIR="${PWD}/dist"
@@ -179,8 +209,13 @@ jobs:
           export CCM_INSTALL_NCURSES_VARIANT="${{ matrix.ncurses_variant }}"
           export CCM_INSTALL_OS="Linux"
           export CCM_INSTALL_ARCH="x86_64"
-          mkdir -p "${CCM_INSTALL_DEST}" "${CCM_INSTALL_ROOT}" "${RUNNER_TEMP}/ccm-test/config"
+          unset CCM_INSTALL_TAG || true
           sh scripts/install_ccm.sh
+          NEW_CURRENT="$(readlink "${CCM_INSTALL_ROOT}/current")"
+          if [ -n "${OLD_CURRENT:-}" ] && [ "${NEW_CURRENT}" = "${OLD_CURRENT}" ]; then
+            echo "current symlink was not updated"
+            exit 1
+          fi
 
       - name: Smoke test linux bundle
         run: |
@@ -194,6 +229,8 @@ jobs:
     runs-on: macos-15-intel
     needs:
       - build-macos-x86_64
+    env:
+      UPGRADE_FROM_TAG: v0.6.4
     steps:
       - uses: actions/checkout@v4
 
@@ -209,7 +246,30 @@ jobs:
           cd dist
           shasum -a 256 ccm-macos-x86_64.tar.gz > checksums.txt
 
-      - name: Install macOS x86_64 bundle
+      - name: Download old macOS x86_64 asset
+        run: |
+          set -euxo pipefail
+          OLD_DIR="${RUNNER_TEMP}/ccm-old"
+          OLD_ASSET="ccm-macos-x86_64.tar.gz"
+          OLD_URL="https://github.com/${{ github.repository }}/releases/download/${UPGRADE_FROM_TAG}/${OLD_ASSET}"
+          mkdir -p "${OLD_DIR}"
+          curl -fsSL "${OLD_URL}" -o "${OLD_DIR}/${OLD_ASSET}"
+          (cd "${OLD_DIR}" && shasum -a 256 "${OLD_ASSET}" > checksums.txt)
+
+      - name: Install old macOS x86_64 bundle
+        run: |
+          set -euxo pipefail
+          export CCM_INSTALL_FROM_DIR="${RUNNER_TEMP}/ccm-old"
+          export CCM_INSTALL_DEST="${RUNNER_TEMP}/ccm-test/bin"
+          export CCM_INSTALL_ROOT="${RUNNER_TEMP}/ccm-test/root"
+          export CCM_INSTALL_TAG="${UPGRADE_FROM_TAG}"
+          export CCM_INSTALL_OS="Darwin"
+          export CCM_INSTALL_ARCH="x86_64"
+          mkdir -p "${CCM_INSTALL_DEST}" "${CCM_INSTALL_ROOT}" "${RUNNER_TEMP}/ccm-test/config"
+          sh scripts/install_ccm.sh
+          echo "OLD_CURRENT=$(readlink "${CCM_INSTALL_ROOT}/current")" >> "${GITHUB_ENV}"
+
+      - name: Upgrade to new macOS x86_64 bundle
         run: |
           set -euxo pipefail
           export CCM_INSTALL_FROM_DIR="${PWD}/dist"
@@ -217,8 +277,13 @@ jobs:
           export CCM_INSTALL_ROOT="${RUNNER_TEMP}/ccm-test/root"
           export CCM_INSTALL_OS="Darwin"
           export CCM_INSTALL_ARCH="x86_64"
-          mkdir -p "${CCM_INSTALL_DEST}" "${CCM_INSTALL_ROOT}" "${RUNNER_TEMP}/ccm-test/config"
+          unset CCM_INSTALL_TAG || true
           sh scripts/install_ccm.sh
+          NEW_CURRENT="$(readlink "${CCM_INSTALL_ROOT}/current")"
+          if [ -n "${OLD_CURRENT:-}" ] && [ "${NEW_CURRENT}" = "${OLD_CURRENT}" ]; then
+            echo "current symlink was not updated"
+            exit 1
+          fi
 
       - name: Smoke test macOS x86_64 bundle
         run: |
@@ -232,6 +297,8 @@ jobs:
     runs-on: macos-latest
     needs:
       - build-macos-arm64
+    env:
+      UPGRADE_FROM_TAG: v0.6.4
     steps:
       - uses: actions/checkout@v4
 
@@ -247,7 +314,30 @@ jobs:
           cd dist
           shasum -a 256 ccm-macos-arm64.tar.gz > checksums.txt
 
-      - name: Install macOS arm64 bundle
+      - name: Download old macOS arm64 asset
+        run: |
+          set -euxo pipefail
+          OLD_DIR="${RUNNER_TEMP}/ccm-old"
+          OLD_ASSET="ccm-macos-arm64.tar.gz"
+          OLD_URL="https://github.com/${{ github.repository }}/releases/download/${UPGRADE_FROM_TAG}/${OLD_ASSET}"
+          mkdir -p "${OLD_DIR}"
+          curl -fsSL "${OLD_URL}" -o "${OLD_DIR}/${OLD_ASSET}"
+          (cd "${OLD_DIR}" && shasum -a 256 "${OLD_ASSET}" > checksums.txt)
+
+      - name: Install old macOS arm64 bundle
+        run: |
+          set -euxo pipefail
+          export CCM_INSTALL_FROM_DIR="${RUNNER_TEMP}/ccm-old"
+          export CCM_INSTALL_DEST="${RUNNER_TEMP}/ccm-test/bin"
+          export CCM_INSTALL_ROOT="${RUNNER_TEMP}/ccm-test/root"
+          export CCM_INSTALL_TAG="${UPGRADE_FROM_TAG}"
+          export CCM_INSTALL_OS="Darwin"
+          export CCM_INSTALL_ARCH="arm64"
+          mkdir -p "${CCM_INSTALL_DEST}" "${CCM_INSTALL_ROOT}" "${RUNNER_TEMP}/ccm-test/config"
+          sh scripts/install_ccm.sh
+          echo "OLD_CURRENT=$(readlink "${CCM_INSTALL_ROOT}/current")" >> "${GITHUB_ENV}"
+
+      - name: Upgrade to new macOS arm64 bundle
         run: |
           set -euxo pipefail
           export CCM_INSTALL_FROM_DIR="${PWD}/dist"
@@ -255,8 +345,13 @@ jobs:
           export CCM_INSTALL_ROOT="${RUNNER_TEMP}/ccm-test/root"
           export CCM_INSTALL_OS="Darwin"
           export CCM_INSTALL_ARCH="arm64"
-          mkdir -p "${CCM_INSTALL_DEST}" "${CCM_INSTALL_ROOT}" "${RUNNER_TEMP}/ccm-test/config"
+          unset CCM_INSTALL_TAG || true
           sh scripts/install_ccm.sh
+          NEW_CURRENT="$(readlink "${CCM_INSTALL_ROOT}/current")"
+          if [ -n "${OLD_CURRENT:-}" ] && [ "${NEW_CURRENT}" = "${OLD_CURRENT}" ]; then
+            echo "current symlink was not updated"
+            exit 1
+          fi
 
       - name: Smoke test macOS arm64 bundle
         run: |
