@@ -13,6 +13,8 @@ permissions:
 jobs:
   build-linux-x86_64-glibc217:
     runs-on: ubuntu-latest
+    env:
+      IMAGE_REPO: ${{ github.repository == 'baaaaaaaka/cursor_cli_manager' && format('ghcr.io/{0}/ccm-linux-builder', github.repository_owner) || format('ghcr.io/{0}/{1}/ccm-linux-builder', github.repository_owner, github.event.repository.name) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -25,7 +27,7 @@ jobs:
 
       - name: Build linux binary (builder image)
         env:
-          CCM_LINUX_BUILDER_IMAGE: ghcr.io/baaaaaaaka/ccm-linux-builder:py311
+          CCM_LINUX_BUILDER_IMAGE: ${{ env.IMAGE_REPO }}:py311
           CCM_LINUX_VARIANT: common
         run: |
           set -euxo pipefail
@@ -38,6 +40,8 @@ jobs:
 
   build-linux-x86_64-nc5:
     runs-on: ubuntu-latest
+    env:
+      IMAGE_REPO: ${{ github.repository == 'baaaaaaaka/cursor_cli_manager' && format('ghcr.io/{0}/ccm-linux-builder', github.repository_owner) || format('ghcr.io/{0}/{1}/ccm-linux-builder', github.repository_owner, github.event.repository.name) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -50,7 +54,7 @@ jobs:
 
       - name: Build linux binary (builder image)
         env:
-          CCM_LINUX_BUILDER_IMAGE: ghcr.io/baaaaaaaka/ccm-linux-builder:py311
+          CCM_LINUX_BUILDER_IMAGE: ${{ env.IMAGE_REPO }}:py311
           CCM_LINUX_VARIANT: nc5
         run: |
           set -euxo pipefail
@@ -63,6 +67,8 @@ jobs:
 
   build-linux-x86_64-nc6:
     runs-on: ubuntu-latest
+    env:
+      IMAGE_REPO: ${{ github.repository == 'baaaaaaaka/cursor_cli_manager' && format('ghcr.io/{0}/ccm-linux-builder', github.repository_owner) || format('ghcr.io/{0}/{1}/ccm-linux-builder', github.repository_owner, github.event.repository.name) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -75,7 +81,7 @@ jobs:
 
       - name: Build linux binary (builder image)
         env:
-          CCM_LINUX_BUILDER_IMAGE: ghcr.io/baaaaaaaka/ccm-linux-builder:py311-nc6
+          CCM_LINUX_BUILDER_IMAGE: ${{ env.IMAGE_REPO }}:py311-nc6
           CCM_LINUX_VARIANT: nc6
         run: |
           set -euxo pipefail
