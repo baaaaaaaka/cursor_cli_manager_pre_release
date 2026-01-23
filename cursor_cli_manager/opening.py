@@ -3,10 +3,12 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import signal
+import subprocess
 import threading
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from cursor_cli_manager.update import _default_runner
 
@@ -15,6 +17,8 @@ ENV_CURSOR_AGENT_PATH = "CURSOR_AGENT_PATH"
 
 # Default cursor-agent flags we want enabled for interactive runs.
 DEFAULT_CURSOR_AGENT_FLAGS = ["--approve-mcps", "--browser", "--force"]
+
+_FORCE_DISABLED_RETRY_MESSAGE = "Detected 'Run Everything' restriction; retrying without '--force'."
 
 
 _PROBE_LOCK = threading.Lock()
@@ -118,6 +122,67 @@ def _prepare_exec_command(cmd: List[str]) -> List[str]:
     return cmd
 
 
+def _stderr_indicates_force_disabled(stderr_text: str) -> bool:
+    text = (stderr_text or "").lower()
+    return "run everything" in text and "disabled" in text and "--force" in text
+
+
+def _run_cursor_agent(cmd: List[str]) -> Tuple[int, str]:
+    """
+    Run cursor-agent with stderr mirrored to the terminal.
+    Returns (exit_code, captured_stderr).
+    """
+    p = subprocess.Popen(
+        list(cmd),
+        stdin=None,
+        stdout=None,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    stderr_chunks: List[str] = []
+
+    def _drain_stderr() -> None:
+        if p.stderr is None:
+            return
+        while True:
+            chunk = p.stderr.read(4096)
+            if not chunk:
+                break
+            stderr_chunks.append(chunk)
+            try:
+                sys.stderr.write(chunk)
+                sys.stderr.flush()
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_drain_stderr, daemon=True)
+    t.start()
+    try:
+        rc = p.wait()
+    except KeyboardInterrupt:
+        try:
+            p.send_signal(signal.SIGINT)
+        except Exception:
+            pass
+        rc = p.wait()
+    t.join(timeout=1.0)
+    return rc or 0, "".join(stderr_chunks)
+
+
+def _exec_cursor_agent(cmd: List[str]) -> "os.NoReturn":
+    if "--force" in cmd or "-f" in cmd:
+        rc, err = _run_cursor_agent(cmd)
+        if rc != 0 and _stderr_indicates_force_disabled(err):
+            retry_cmd = _without_force_flag(cmd)
+            try:
+                print(_FORCE_DISABLED_RETRY_MESSAGE, file=sys.stderr, flush=True)
+            except Exception:
+                pass
+            os.execvp(retry_cmd[0], retry_cmd)
+        raise SystemExit(rc)
+    os.execvp(cmd[0], cmd)
+
+
 def resolve_cursor_agent_path(explicit: Optional[str] = None) -> Optional[str]:
     """
     Resolve the `cursor-agent` executable.
@@ -211,7 +276,7 @@ def exec_resume_chat(
         print(f"Launching cursor-agent{ws}… (resume {chat_id})", file=sys.stderr, flush=True)
     except Exception:
         pass
-    os.execvp(cmd[0], cmd)
+    _exec_cursor_agent(cmd)
 
 
 def exec_new_chat(
@@ -234,5 +299,5 @@ def exec_new_chat(
         print(f"Launching cursor-agent{ws}…", file=sys.stderr, flush=True)
     except Exception:
         pass
-    os.execvp(cmd[0], cmd)
+    _exec_cursor_agent(cmd)
 

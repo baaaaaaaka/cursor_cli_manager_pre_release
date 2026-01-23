@@ -151,14 +151,10 @@ class TestOpening(unittest.TestCase):
             agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
 
             err_buf = io.StringIO()
-
-            def fake_execvp(_file, _args):  # noqa: ANN001
-                raise RuntimeError("exec called")
-
             with patch("cursor_cli_manager.opening._supports_force_flag", return_value=True), patch(
-                "cursor_cli_manager.opening.os.execvp", side_effect=fake_execvp
+                "cursor_cli_manager.opening._run_cursor_agent", return_value=(0, "")
             ), redirect_stderr(err_buf):
-                with self.assertRaises(RuntimeError):
+                with self.assertRaises(SystemExit):
                     exec_new_chat(workspace_path=ws, cursor_agent_path=str(agent))
 
             self.assertIn("Launching cursor-agent", err_buf.getvalue())
@@ -172,19 +168,42 @@ class TestOpening(unittest.TestCase):
             agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
 
             err_buf = io.StringIO()
-
-            def fake_execvp(_file, _args):  # noqa: ANN001
-                raise RuntimeError("exec called")
-
             with patch("cursor_cli_manager.opening._supports_force_flag", return_value=True), patch(
-                "cursor_cli_manager.opening.os.execvp", side_effect=fake_execvp
+                "cursor_cli_manager.opening._run_cursor_agent", return_value=(0, "")
             ), redirect_stderr(err_buf):
-                with self.assertRaises(RuntimeError):
+                with self.assertRaises(SystemExit):
                     exec_resume_chat("abc123", workspace_path=ws, cursor_agent_path=str(agent))
 
             out = err_buf.getvalue()
             self.assertIn("Launching cursor-agent", out)
             self.assertIn("abc123", out)
+
+    def test_exec_new_chat_retries_without_force_when_admin_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            ws = td_path / "ws"
+            ws.mkdir(parents=True, exist_ok=True)
+            agent = td_path / "cursor-agent"
+            agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+            err_msg = (
+                "Error: Your team administrator has disabled the 'Run Everything' option.\n"
+                "Please run without '--force' to approve commands individually.\n"
+            )
+            captured: dict = {}
+
+            def fake_execvp(_file, args):  # noqa: ANN001
+                captured["args"] = list(args)
+                raise RuntimeError("exec called")
+
+            with patch("cursor_cli_manager.opening._supports_force_flag", return_value=True), patch(
+                "cursor_cli_manager.opening._run_cursor_agent", return_value=(1, err_msg)
+            ), patch("cursor_cli_manager.opening.os.execvp", side_effect=fake_execvp):
+                with self.assertRaises(RuntimeError):
+                    exec_new_chat(workspace_path=ws, cursor_agent_path=str(agent))
+
+            self.assertIn("--workspace", captured["args"])
+            self.assertNotIn("--force", captured["args"])
 
 
 if __name__ == "__main__":
