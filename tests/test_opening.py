@@ -119,9 +119,12 @@ class TestOpening(unittest.TestCase):
                     # Must not block even though probe is still running.
                     self.assertEqual(get_cursor_agent_flags(), DEFAULT_CURSOR_AGENT_FLAGS)
                 finally:
+                    evt.set()
+                    t_wait = time.monotonic()
+                    while opening._PROBED_CURSOR_AGENT_FLAGS is None and (time.monotonic() - t_wait) < 1.0:
+                        time.sleep(0.01)
                     opening._PROBE_STARTED = old_started
                     opening._PROBED_CURSOR_AGENT_FLAGS = old_probed
-            evt.set()
 
     def test_prepare_exec_command_drops_force_when_unsupported(self) -> None:
         import cursor_cli_manager.opening as opening
@@ -151,7 +154,9 @@ class TestOpening(unittest.TestCase):
             agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
 
             err_buf = io.StringIO()
-            with patch("cursor_cli_manager.opening._supports_force_flag", return_value=True), patch(
+            with patch(
+                "cursor_cli_manager.opening.get_cursor_agent_flags", return_value=DEFAULT_CURSOR_AGENT_FLAGS
+            ), patch("cursor_cli_manager.opening._supports_force_flag", return_value=True), patch(
                 "cursor_cli_manager.opening._run_cursor_agent", return_value=(0, "")
             ), redirect_stderr(err_buf):
                 with self.assertRaises(SystemExit):
@@ -168,7 +173,9 @@ class TestOpening(unittest.TestCase):
             agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
 
             err_buf = io.StringIO()
-            with patch("cursor_cli_manager.opening._supports_force_flag", return_value=True), patch(
+            with patch(
+                "cursor_cli_manager.opening.get_cursor_agent_flags", return_value=DEFAULT_CURSOR_AGENT_FLAGS
+            ), patch("cursor_cli_manager.opening._supports_force_flag", return_value=True), patch(
                 "cursor_cli_manager.opening._run_cursor_agent", return_value=(0, "")
             ), redirect_stderr(err_buf):
                 with self.assertRaises(SystemExit):
@@ -196,7 +203,9 @@ class TestOpening(unittest.TestCase):
                 captured["args"] = list(args)
                 raise RuntimeError("exec called")
 
-            with patch("cursor_cli_manager.opening._supports_force_flag", return_value=True), patch(
+            with patch(
+                "cursor_cli_manager.opening.get_cursor_agent_flags", return_value=DEFAULT_CURSOR_AGENT_FLAGS
+            ), patch("cursor_cli_manager.opening._supports_force_flag", return_value=True), patch(
                 "cursor_cli_manager.opening._run_cursor_agent", return_value=(1, err_msg)
             ), patch("cursor_cli_manager.opening.os.execvp", side_effect=fake_execvp):
                 with self.assertRaises(RuntimeError):
